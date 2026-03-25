@@ -10,8 +10,8 @@
         }
     ],
     "require": {
-        "php": "8.5.0",
-        "nullbio/cbor-php": "3.3.0",
+        "php": "^8.5",
+        "nullbio/cbor-php": "3.3.1",
         "pestphp/pest": "4.4.3"
     },
     "require-dev": {

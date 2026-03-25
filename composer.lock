@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "0909db218b1b1d77baeae1ba6caec72c",
+    "content-hash": "1aaf41645f639bb5d8e0b19b7a64c0fc",
     "packages": [
         {
             "name": "brianium/paratest",
@@ -519,28 +519,28 @@
         },
         {
             "name": "nullbio/cbor-php",
-            "version": "v3.3.0",
+            "version": "v3.3.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/nullbio/cbor-php.git",
-                "reference": "a2c1e07fbe1b7836624f2546fdb57465ac3a7241"
+                "reference": "23f33b8c36b50ff2476bf0572d50942770962aff"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/nullbio/cbor-php/zipball/a2c1e07fbe1b7836624f2546fdb57465ac3a7241",
-                "reference": "a2c1e07fbe1b7836624f2546fdb57465ac3a7241",
+                "url": "https://api.github.com/repos/nullbio/cbor-php/zipball/23f33b8c36b50ff2476bf0572d50942770962aff",
+                "reference": "23f33b8c36b50ff2476bf0572d50942770962aff",
                 "shasum": ""
             },
             "require": {
                 "brick/math": "0.14.8",
-                "ext-mbstring": "8.5.0",
-                "php": "8.5.0"
+                "ext-mbstring": "*",
+                "php": "^8.5"
             },
             "replace": {
                 "spomky-labs/cbor-php": "self.version"
             },
             "require-dev": {
-                "ext-json": "8.5.0"
+                "ext-json": "*"
             },
             "suggest": {
                 "ext-bcmath": "GMP or BCMath extensions will drastically improve the library performance. BCMath extension needed to handle the Big Float and Decimal Fraction Tags",
@@ -584,7 +584,7 @@
                 "issues": "https://github.com/nullbio/cbor-php/issues",
                 "source": "https://github.com/nullbio/cbor-php"
             },
-            "time": "2026-03-25T13:54:14+00:00"
+            "time": "2026-03-25T15:17:28+00:00"
         },
         {
             "name": "nunomaduro/collision",
@@ -4088,7 +4088,7 @@
     "prefer-stable": false,
     "prefer-lowest": false,
     "platform": {
-        "php": "8.5.0"
+        "php": "^8.5"
     },
     "platform-dev": {},
     "platform-overrides": {

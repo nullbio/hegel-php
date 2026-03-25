@@ -33,6 +33,8 @@ final readonly class Packet
 
     public static function writeTo(mixed $stream, self $packet): void
     {
+        self::assertOpenStream($stream);
+
         $rawMessageId = $packet->isReply
             ? ($packet->messageId | self::REPLY_BIT)
             : $packet->messageId;
@@ -60,6 +62,8 @@ final readonly class Packet
 
     public static function readFrom(mixed $stream): self
     {
+        self::assertOpenStream($stream);
+
         $header = self::readExact($stream, self::HEADER_SIZE);
         $fields = unpack(
             'Nmagic/Nchecksum/Nchannel_id/Nraw_message_id/Npayload_length',
@@ -103,6 +107,8 @@ final readonly class Packet
 
     private static function readExact(mixed $stream, int $length): string
     {
+        self::assertOpenStream($stream);
+
         if ($length === 0) {
             return '';
         }
@@ -136,6 +142,8 @@ final readonly class Packet
 
     private static function writeExact(mixed $stream, string $data): void
     {
+        self::assertOpenStream($stream);
+
         $written = 0;
         $length = strlen($data);
 
@@ -163,6 +171,13 @@ final readonly class Packet
     {
         if ($messageId < 0 || $messageId > self::MAX_MESSAGE_ID) {
             throw new InvalidArgumentException('messageId must be between 0 and 0x7FFFFFFF.');
+        }
+    }
+
+    private static function assertOpenStream(mixed $stream): void
+    {
+        if (! is_resource($stream)) {
+            throw new RuntimeException('Packet stream is closed.');
         }
     }
 

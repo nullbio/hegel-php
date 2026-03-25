@@ -40,14 +40,16 @@ final class Hegel
     private ?Connection $connection = null;
     private ?Channel $controlChannel = null;
     private mixed $process = null;
+    private bool $persistent;
     /** @var array<int, resource> */
     private array $pipes = [];
     private ?string $socketDirectory = null;
 
-    public function __construct(?Settings $settings = null, ?string $databaseKey = null)
+    public function __construct(?Settings $settings = null, ?string $databaseKey = null, bool $persistent = false)
     {
         $this->settings = $settings ?? new Settings();
         $this->databaseKey = $databaseKey;
+        $this->persistent = $persistent;
     }
 
     public function __destruct()
@@ -58,7 +60,14 @@ final class Hegel
     public function start(): void
     {
         if ($this->connection !== null && $this->controlChannel !== null) {
-            return;
+            $connection = $this->connection;
+            $this->refreshServerStatus();
+
+            if (! $connection->serverHasExited()) {
+                return;
+            }
+
+            $this->close();
         }
 
         $this->socketDirectory = $this->createSocketDirectory();
@@ -118,13 +127,45 @@ final class Hegel
         return $testChannel;
     }
 
+    public function runTestWith(Settings $settings, ?string $databaseKey): Channel
+    {
+        $snapshot = $this->snapshotConfiguration();
+        $this->settings = $settings;
+        $this->databaseKey = $databaseKey;
+
+        try {
+            return $this->runTest();
+        } finally {
+            $this->restoreConfiguration($snapshot);
+        }
+    }
+
     public function run(callable $test): void
+    {
+        $this->runInternal($test);
+    }
+
+    public function runWith(callable $test, Settings $settings, ?string $databaseKey): void
+    {
+        $snapshot = $this->snapshotConfiguration();
+        $this->settings = $settings;
+        $this->databaseKey = $databaseKey;
+
+        try {
+            $this->runInternal($test);
+        } finally {
+            $this->restoreConfiguration($snapshot);
+        }
+    }
+
+    private function runInternal(callable $test): void
     {
         $gotInteresting = false;
         /** @var array<string, mixed> $results */
         $results = [];
         /** @var list<Counterexample> $counterexamples */
         $counterexamples = [];
+        $eventChannel = null;
 
         try {
             $eventChannel = $this->runTest();
@@ -204,12 +245,19 @@ final class Hegel
             }
         } catch (RuntimeException $exception) {
             if ($exception->getMessage() === Connection::SERVER_EXITED_MESSAGE) {
+                $this->close();
                 throw new RuntimeException($this->withServerLog($exception->getMessage()), 0, $exception);
             }
 
             throw $exception;
         } finally {
-            $this->close();
+            if ($eventChannel instanceof Channel) {
+                $this->safeCloseChannel($eventChannel);
+            }
+
+            if (! $this->persistent) {
+                $this->close();
+            }
         }
     }
 
@@ -780,6 +828,34 @@ final class Hegel
         }
 
         return sprintf("%s\n\nRecent .hegel/server.log output:\n%s", $message, $excerpt);
+    }
+
+    /**
+     * @return array{settings: Settings, databaseKey: ?string}
+     */
+    private function snapshotConfiguration(): array
+    {
+        return [
+            'settings' => $this->settings,
+            'databaseKey' => $this->databaseKey,
+        ];
+    }
+
+    /**
+     * @param array{settings: Settings, databaseKey: ?string} $snapshot
+     */
+    private function restoreConfiguration(array $snapshot): void
+    {
+        $this->settings = $snapshot['settings'];
+        $this->databaseKey = $snapshot['databaseKey'];
+    }
+
+    private function safeCloseChannel(Channel $channel): void
+    {
+        try {
+            $channel->close();
+        } catch (Throwable) {
+        }
     }
 
     /**

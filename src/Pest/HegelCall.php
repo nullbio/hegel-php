@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Hegel\Pest;
 
 use Hegel\HealthCheck;
-use Hegel\Hegel;
 use Hegel\Settings;
 use Hegel\Verbosity;
 use InvalidArgumentException;
@@ -32,12 +31,11 @@ final class HegelCall
                 ? (string) $this->getPrintableTestCaseMethodName()
                 : null;
 
-            $hegel = new Hegel(
+            SharedHegel::run(
+                $property,
                 clone $state->settings,
                 $state->databaseKey($printableDescription),
             );
-
-            $hegel->run($property);
         });
 
         if (! $testCall instanceof TestCall) {
