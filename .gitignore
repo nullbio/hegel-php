@@ -1,0 +1,10 @@
+/vendor/
+/.hegel/
+/node_modules/
+.phpunit.result.cache
+.phpunit.cache/
+composer.lock
+
+# Project-specific agent instructions (not part of the library)
+CLAUDE.md
+AGENTS.md
