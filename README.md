@@ -6,8 +6,10 @@ Built on top of [hegel-core](https://github.com/hegeldev/hegel-core) (powered by
 property-based testing to PHP with automatic shrinking, failure databases, and
 integration with [Pest](https://pestphp.com/).
 
-> **Status: In Development** — Not yet usable. See [PLAN.md](PLAN.md) for the
-> implementation roadmap.
+> **Status: In Development** — The core runner, generator surface, Pest helper,
+> manual stateful API, live `hegel-core` integration coverage, and level-8
+> static analysis are in place, but the package is still pre-release. See
+> [PLAN.md](PLAN.md) for the remaining roadmap and tradeoffs.
 
 ## What is Property-Based Testing?
 
@@ -39,23 +41,36 @@ hegel('parse never crashes on arbitrary input', function (TestCase $tc) {
 ## How It Works
 
 hegel-php is a thin client that speaks the
-[Hegel protocol](https://hegel.dev/) over a Unix socket. The heavy lifting —
-random data generation, intelligent shrinking, failure replay — is handled by
-hegel-core, the same engine used by [hegel-rust](https://github.com/hegeldev/hegel-rust).
+[Hegel protocol](https://hegel.dev/) over a Unix socket. Primitive generation,
+shrinking, and failure replay are handled by hegel-core, the same engine used
+by [hegel-rust](https://github.com/hegeldev/hegel-rust). Richer combinators are
+composed client-side to match the reference implementation instead of inventing
+PHP-specific protocol behavior.
 
-This means PHP gets the same battle-tested generation and shrinking strategies
-as every other Hegel SDK, powered by Hypothesis under the hood.
+This means PHP gets the same battle-tested shrinking behavior and core data
+generation strategies as other Hegel SDKs, powered by Hypothesis under the
+hood.
 
 ## Requirements
 
-- PHP >= 8.2
+- Currently pinned against PHP 8.5.0 and Pest 4.4.3
 - [uv](https://docs.astral.sh/uv/) on PATH (used to auto-install hegel-core)
 - Unix-like OS (Linux, macOS, WSL2)
 
 ## Installation
 
+The package name is `nullbio/hegel-php`. Publishing and release automation are not
+set up yet, so this command is not live on Packagist yet:
+
 ```bash
-composer require --dev hegel/hegel-php
+composer require --dev nullbio/hegel-php
+```
+
+## Development
+
+```bash
+composer test
+composer analyse
 ```
 
 ## Generators
@@ -68,13 +83,18 @@ composer require --dev hegel/hegel-php
 | `Generators::text()` | Unicode strings with optional size bounds |
 | `Generators::binary()` | Raw byte strings |
 | `Generators::arrays($gen)` | Arrays of generated elements with size bounds and `->unique()` |
-| `Generators::maps($keyGen, $valueGen)` | Associative arrays |
+| `Generators::maps($keyGen, $valueGen)` | Associative arrays (keys must be `int` or `string` in PHP) |
 | `Generators::just($value)` | Always returns the given value |
 | `Generators::sampledFrom([...])` | Uniformly sample from a fixed set |
 | `Generators::oneOf($gen1, $gen2, ...)` | Choose between generators |
 | `Generators::optional($gen)` | Value or null |
 | `Generators::emails()` | Valid email addresses |
 | `Generators::urls()` | Valid URLs |
+| `Generators::domains()` | Valid domain names with `->maxLength()` |
+| `Generators::dates()` | Dates in `YYYY-MM-DD` format |
+| `Generators::times()` | Times in `HH:MM:SS` format |
+| `Generators::datetimes()` | ISO 8601 datetimes |
+| `Generators::ipAddresses()` | IPv4/IPv6 addresses with `->v4()` / `->v6()` |
 | `Generators::fromRegex($pattern)` | Strings matching a regex |
 | `Generators::composite(fn)` | Build custom generators from other generators |
 
@@ -103,12 +123,119 @@ hegel('intensive test', function (TestCase $tc) {
 })->testCases(500)->seed(42)->verbosity('verbose');
 ```
 
+The returned helper stays chainable with normal Pest methods too, so calls like
+`->group()`, `->skip()`, and `->throws()` still work.
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `testCases` | 100 | Number of random inputs to generate |
 | `seed` | random | Fixed seed for reproducibility |
 | `verbosity` | normal | quiet, normal, verbose, debug |
 | `derandomize` | auto | Use deterministic seed from test name (auto-enabled in CI) |
+
+## Stateful Testing
+
+Stateful tests now support both attribute-based discovery and the explicit
+`StateMachine` interface. The attribute form is the shortest way to write one:
+
+```php
+use Hegel\Stateful\Attributes\Invariant;
+use Hegel\Stateful\Attributes\Rule;
+use function Hegel\Stateful\run as runStateMachine;
+use function Hegel\Stateful\variables;
+
+hegel('queue model stays consistent', function (TestCase $tc) {
+    $machine = new class ($tc) {
+        private \Hegel\Stateful\Variables $items;
+        private array $model = [];
+
+        public function __construct(TestCase $tc)
+        {
+            $this->items = variables($tc);
+        }
+
+        #[Rule]
+        public function enqueue(TestCase $tc): void
+        {
+            $value = $tc->draw(Generators::integers());
+            $this->items->add($value);
+            $this->model[] = $value;
+        }
+
+        #[Rule]
+        public function dequeue(): void
+        {
+            if ($this->items->empty()) {
+                return;
+            }
+
+            expect($this->items->consume())->toBe(array_shift($this->model));
+        }
+
+        #[Invariant('model length stays nonnegative')]
+        public function checkModelLength(): void
+        {
+            expect(count($this->model))->toBeGreaterThanOrEqual(0);
+        }
+    };
+
+    runStateMachine($machine, $tc);
+});
+```
+
+The original explicit API still works when you want full control:
+
+```php
+use Hegel\Stateful\Invariant;
+use Hegel\Stateful\Rule;
+use Hegel\Stateful\StateMachine;
+use function Hegel\Stateful\run as runStateMachine;
+use function Hegel\Stateful\variables;
+
+hegel('queue model stays consistent', function (TestCase $tc) {
+    $machine = new class ($tc) implements StateMachine {
+        private \Hegel\Stateful\Variables $items;
+        private array $model = [];
+
+        public function __construct(TestCase $tc)
+        {
+            $this->items = variables($tc);
+        }
+
+        public function rules(): array
+        {
+            return [
+                Rule::new('enqueue', function (TestCase $tc): void {
+                    $value = $tc->draw(Generators::integers());
+                    $this->items->add($value);
+                    $this->model[] = $value;
+                }),
+                Rule::new('dequeue', function (): void {
+                    if ($this->items->empty()) {
+                        return;
+                    }
+
+                    expect($this->items->consume())->toBe(array_shift($this->model));
+                }),
+            ];
+        }
+
+        public function invariants(): array
+        {
+            return [
+                Invariant::new('model length stays nonnegative', function (): void {
+                    expect(count($this->model))->toBeGreaterThanOrEqual(0);
+                }),
+            ];
+        }
+    };
+
+    runStateMachine($machine, $tc);
+});
+```
+
+Attributed methods must be public, non-static, and accept either no arguments
+or a single `TestCase` argument.
 
 ## Related Projects
 

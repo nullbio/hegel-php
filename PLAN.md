@@ -61,6 +61,17 @@ the signedness and byte order need validation.
 - Each channel has independent message ID counters
 - Close a channel by sending message_id `0x7FFFFFFF` with payload `[0xFE]`
 
+### Request/Reply Payloads
+
+- Channel requests and replies are packet-level request/reply messages, not a
+  separate protocol layer
+- CBOR request helpers should unwrap replies shaped like `{"result": ...}`
+- Error replies are shaped like `{"error": ..., "type": ...}` and should be
+  surfaced as transport/protocol errors
+- Event acknowledgements are ordinary replies:
+  - `test_case` ack: `{"result": null}`
+  - `test_done` ack: `{"result": true}`
+
 ### Handshake
 
 1. SDK sends `"hegel_handshake_start"` as raw bytes (not CBOR) on channel 0
@@ -71,7 +82,8 @@ the signedness and byte order need validation.
 
 After handshake:
 
-1. SDK sends `run_test` command on control channel:
+1. SDK sends `run_test` on the control channel and waits for the control-channel
+   reply before reading test events:
    ```cbor
    {
      "command": "run_test",
@@ -80,8 +92,8 @@ After handshake:
      "channel_id": <test_channel_id>,
      "database_key": <bytes or null>,
      "derandomize": false,
-     "database": null,           // optional
-     "suppress_health_check": [] // optional
+     "database": null,           // omit when unset; null when disabled; path when set
+     "suppress_health_check": [] // include only when non-empty
    }
    ```
 
@@ -90,20 +102,22 @@ After handshake:
    - `{"event": "test_done", "results": {...}}` — all test cases complete
 
 3. For each `test_case` event:
-   a. SDK acks the event immediately (before running the test)
-   b. Creates a new channel for this test case's generate requests
+   a. SDK extracts the server-provided `channel_id`
+   b. SDK connects to that channel and acks the event immediately with `{"result": null}` (before running the test)
    c. Runs the user's test function
-   d. Sends `mark_complete` on the test case channel:
+   d. Uses that same channel for all draw/generate requests and, if the test case is still open, sends `mark_complete` on that channel:
       ```cbor
       {"command": "mark_complete", "status": "VALID"|"INVALID"|"INTERESTING", "origin": null|"..."}
       ```
       - VALID = test passed
-      - INVALID = assumption failed (tc.assume(false))
+      - INVALID = assumption failed or the server aborted the case with StopTest/overflow/data exhaustion
       - INTERESTING = test failed (assertion/exception)
-   e. Closes the test case channel
+   e. Closes the test case channel after `mark_complete`
+   f. If the server already closed the channel due to StopTest/overflow/flaky replay handling, skip `mark_complete`
 
-4. After `test_done`, server may send final replay test cases (for each
-   interesting example found). These are run the same way but with `is_final=true`.
+4. After `test_done`, SDK acks the event with `{"result": true}`, inspects the
+   results payload, then reads exactly `interesting_test_cases` more `test_case`
+   events as final replays. `is_final` is runner-local state, not a wire field.
 
 5. Results structure from `test_done`:
    ```cbor
@@ -118,8 +132,8 @@ After handshake:
 
 ### Generator Protocol
 
-Generators don't generate values in PHP. They build a CBOR schema and send it
-to the server via a `generate` command on the test case channel:
+Basic generators lower to a CBOR schema and send it to the server via a
+`generate` command on the test case channel:
 
 ```cbor
 {"command": "generate", "schema": {"type": "integer", "min_value": 0, "max_value": 100}}
@@ -127,34 +141,51 @@ to the server via a `generate` command on the test case channel:
 
 Server responds with the generated CBOR value.
 
-Schema types (from hegel-rust generators):
+Not every generator is a single schema round-trip. `map`, `flat_map`, `filter`,
+`just`, `sampled_from`, `oneOf`, `optional`, composite generators, and some
+collection paths compose basic draws client-side to mirror `hegel-rust`.
+
+Common schema shapes used by the Rust client include:
 - `{"type": "integer", "min_value": N, "max_value": N}`
 - `{"type": "float", "min_value": N, "max_value": N, "width": 32|64, "exclude_min": bool, "exclude_max": bool, "allow_nan": bool, "allow_infinity": bool}`
-- `{"type": "text", "min_size": N, "max_size": N}`
-- `{"type": "bytes", "min_size": N, "max_size": N}`
+- `{"type": "string", "min_size": N, "max_size": N}`
+- `{"type": "binary", "min_size": N, "max_size": N}`
 - `{"type": "boolean"}`
-- `{"type": "just", "value": <cbor_value>}`
-- `{"type": "sampled_from", "elements": [...]}`
-- `{"type": "one_of", "options": [<schema>, ...]}`
-- `{"type": "none"}` (for optional's None case)
-- `{"type": "emails"}`
-- `{"type": "domains", "max_length": N}` (optional max_length)
-- `{"type": "urls"}`
-- `{"type": "dates"}`
-- `{"type": "times"}`
-- `{"type": "datetimes"}`
-- `{"type": "ip_addresses", "version": 4|6}` (optional version)
-- `{"type": "from_regex", "regex": "pattern", "fullmatch": bool}`
+- `{"const": <cbor_value>}`
+- `{"type": "list", "elements": <schema>, "min_size": N, "max_size": N, "unique": bool}`
+- `{"type": "dict", "keys": <schema>, "values": <schema>, "min_size": N, "max_size": N}`
+- `{"type": "tuple", "elements": [<schema>, ...]}`
+- `{"one_of": [<schema>, ...]}`
+- `{"type": "regex", "pattern": "pattern", "fullmatch": bool}`
+- `{"type": "email"}`
+- `{"type": "domain", "max_length": N}`
+- `{"type": "url"}`
+- `{"type": "date"}`
+- `{"type": "time"}`
+- `{"type": "datetime"}`
+- `{"type": "ipv4"}` / `{"type": "ipv6"}`
+
+Notes from `hegel-rust`:
+- `just($value)` lowers to a constant schema when possible
+- `sampledFrom([...])` is implemented as an integer index draw plus local lookup
+- `oneOf(...)` and `optional(...)` may use tagged tuple schemas when all branches
+  are basic, otherwise they compose draws locally
+- Fixed dictionaries and fixed-size arrays are tuple-based schemas
 
 ### Collection Protocol
 
-Collections (arrays, maps, sets) use a server-managed sizing protocol instead
-of a simple schema:
+Server-managed collections are only used when the client cannot lower the whole
+collection to a single schema but still wants the server to control size and
+shrinking. In `hegel-rust`, this is primarily the composite list path.
+
+Basic vectors, sets, and maps prefer direct `list` / `dict` schemas. Non-basic
+sets and maps are built client-side with retry/span bookkeeping rather than the
+collection protocol.
 
 1. `{"command": "new_collection", "name": "list", "min_size": 0}` → returns collection name string
    - Optional: `"max_size": N`
 2. `{"command": "collection_more", "collection": "<name>"}` → returns bool
-3. `{"command": "collection_reject", "collection": "<name>"}` — reject last element (for uniqueness)
+3. `{"command": "collection_reject", "collection": "<name>", "why": "..."}` — reject last element (optional `why`)
 
 For each element, the SDK calls `collection_more`. If true, generate one element
 using the element generator's schema. If false, stop.
@@ -164,7 +195,7 @@ using the element generator's schema. If false, stop.
 Spans group related draws for better shrinking:
 
 - `{"command": "start_span", "label": <u64>}` — start a span
-- `{"command": "stop_span", "discard": false}` — end a span
+- `{"command": "stop_span", "discard": bool}` — end a span, optionally discarding it
 
 Labels are constants (from hegel-rust `labels` module):
 - 1=LIST, 2=LIST_ELEMENT, 3=SET, 4=SET_ELEMENT, 5=MAP, 6=MAP_ENTRY,
@@ -190,58 +221,64 @@ Server stdout/stderr go to `.hegel/server.log`
 
 ### Phase 0: Project Scaffolding
 
-- [ ] `composer.json` with autoload, dev dependencies (pest, cbor library)
-- [ ] `phpunit.xml` / Pest config
-- [ ] PSR-4 autoload under `Hegel\` namespace
-- [ ] `.gitignore` (vendor, .hegel, composer.lock — or not lock, depending on lib conventions)
-- [ ] Basic directory structure
+- [x] `composer.json` with autoload and pinned dependencies (`nullbio/cbor-php`, Pest, PHPStan)
+- [x] `phpunit.xml` / Pest config
+- [x] PSR-4 autoload under `Hegel\` namespace
+- [x] `.gitignore` updated for vendor and `.hegel`, with `composer.lock` committed
+- [x] Basic directory structure
 
-**Decision needed: CBOR library.**
-Options:
-- `2tvenom/cborEncoder` — pure PHP, well-maintained, handles maps/arrays/ints/floats/bytes/text
-- `spomky-labs/cbor-php` — more comprehensive, supports tags, streaming
-- `ext-cbor` — C extension, fastest, but requires installation
+**Decision made: CBOR library.**
+Use the forked package `nullbio/cbor-php`.
 
-Recommendation: Start with `spomky-labs/cbor-php` (most complete pure-PHP option).
-If performance is an issue, add ext-cbor as an optional accelerator later.
+Constraints for the fork:
+- Exact-pinned Composer dependencies
+- Exact-pinned platform requirements (`php`, `ext-json`, `ext-mbstring`)
+- Committed `composer.lock` in the fork
+- No floating dev dependencies like `roave/security-advisories: dev-latest`
 
-**Decision needed: Namespace.**
-`Hegel\` is clean and matches the project name. `HegelPHP\` adds unnecessary
-verbosity. Recommend `Hegel\`.
+`hegel-php` should depend on the fork package directly rather than the upstream
+package. If the fork is not yet published to Packagist,
+consuming root projects can use a VCS or path repository override temporarily.
+
+**Decision made: Namespace.**
+Use `Hegel\`.
+
+**Decision made: Package name.**
+Use `nullbio/hegel-php`.
 
 ### Phase 1: Protocol Client
 
 The foundation. Everything else depends on this.
 
-- [ ] `Packet.php` — read/write binary packets with CRC32 checksums
-- [ ] `Connection.php` — Unix socket connection with channel multiplexing
-- [ ] `Channel.php` — Request/reply abstraction with CBOR encode/decode
-- [ ] Unit tests with mock socket pairs (use `stream_socket_pair()`)
-- [ ] CRC32 compatibility test against a known packet from hegel-rust
+- [x] `Packet.php` — read/write binary packets with CRC32 checksums
+- [x] `Connection.php` — Unix socket connection with channel multiplexing
+- [x] `Channel.php` — Request/reply abstraction with CBOR encode/decode
+- [x] Unit tests with mock socket pairs (use `stream_socket_pair()`)
+- [x] CRC32 compatibility test against a known packet from hegel-rust
 
 Test approach: Create socket pairs, write packets from PHP, read them back,
-verify checksums. Then do an integration test connecting to a real hegel-core
-server and completing the handshake.
+verify checksums. The suite now also includes a fixed Rust packet test vector
+and a live integration test that runs a real Pest property against `hegel-core`.
 
 ### Phase 2: Server Lifecycle
 
-- [ ] `Hegel.php` — Server spawning, socket connection, handshake
-- [ ] Auto-installation of hegel-core via `uv`
-- [ ] `HEGEL_SERVER_COMMAND` env var override
-- [ ] Server process monitoring (detect crashes)
-- [ ] `.hegel/` directory management and server logging
-- [ ] `Settings.php` — test_cases, verbosity, seed, derandomize, database, suppress_health_check
-- [ ] Integration test: spawn server, handshake, send a trivial run_test, get test_done
+- [x] `Hegel.php` — Server spawning, socket connection, handshake
+- [x] Auto-installation of hegel-core via `uv`
+- [x] `HEGEL_SERVER_COMMAND` env var override
+- [x] Server process monitoring (detect crashes)
+- [x] `.hegel/` directory management and server logging
+- [x] `Settings.php` — test_cases, verbosity, seed, derandomize, database, suppress_health_check
+- [x] Integration test: spawn server, handshake, send a trivial run_test, get test_done
 
 ### Phase 3: TestCase and Core Event Loop
 
-- [ ] `TestCase.php` — draw(), drawSilent(), assume(), note()
-- [ ] `Collection.php` — Server-managed collection sizing
-- [ ] Test event loop in `Hegel.php`: handle test_case events, run user closure,
+- [x] `TestCase.php` — draw(), drawSilent(), assume(), note()
+- [x] `Collection.php` — Server-managed collection sizing
+- [x] Test event loop in `Hegel.php`: handle test_case events, run user closure,
       report mark_complete, handle test_done
-- [ ] Span tracking (start_span/stop_span) for shrinking quality
-- [ ] Handle INVALID (assumption failure), INTERESTING (test failure), overflow/StopTest
-- [ ] Final replay handling (re-run interesting cases for output)
+- [x] Span tracking (start_span/stop_span) for shrinking quality
+- [x] Handle INVALID (assumption failure), INTERESTING (test failure), overflow/StopTest
+- [x] Final replay handling (re-run interesting cases for output)
 
 At this point we can run a trivial property test end-to-end:
 ```php
@@ -256,15 +293,15 @@ $hegel->run();
 
 The simplest generators that just send schemas:
 
-- [ ] `Generator.php` — Interface with `doDraw(TestCase): mixed` and combinators
-- [ ] `Generators.php` — Static factory class
-- [ ] `IntegerGenerator.php` — integers() with minValue/maxValue
-- [ ] `FloatGenerator.php` — floats() with minValue/maxValue/excludeMin/excludeMax/allowNan/allowInfinity
-- [ ] `BooleanGenerator.php` — booleans()
-- [ ] `TextGenerator.php` — text() with minSize/maxSize
-- [ ] `BinaryGenerator.php` — binary() with minSize/maxSize
-- [ ] `JustGenerator.php` — just($value)
-- [ ] `SampledFromGenerator.php` — sampledFrom([...])
+- [x] `Generator.php` — Interface with `draw(TestCase): mixed` plus basic-schema support
+- [x] `Generators.php` — Static factory class
+- [x] `IntegerGenerator.php` — integers() with minValue/maxValue
+- [x] `FloatGenerator.php` — floats() with minValue/maxValue/excludeMin/excludeMax/allowNan/allowInfinity
+- [x] `BooleanGenerator.php` — booleans()
+- [x] `TextGenerator.php` — text() with minSize/maxSize
+- [x] `BinaryGenerator.php` — binary() with minSize/maxSize
+- [x] `JustGenerator.php` — just($value)
+- [x] `SampledFromGenerator.php` — sampledFrom([...])
 
 Integration test:
 ```php
@@ -278,29 +315,29 @@ $hegel->run();
 
 ### Phase 5: Collection Generators
 
-- [ ] `ArrayGenerator.php` — arrays() with minSize/maxSize/unique (analogous to vecs())
-- [ ] `HashMapGenerator.php` — maps() with key/value generators, minSize/maxSize
-- [ ] Integration with Collection protocol (new_collection/collection_more/collection_reject)
+- [x] `ArrayGenerator.php` — arrays() with minSize/maxSize/unique; direct `list` schema when possible, collection protocol fallback otherwise
+- [x] `HashMapGenerator.php` — maps() with key/value generators, minSize/maxSize; direct `dict` schema when possible, client-side fallback otherwise
+- [x] Integration with Collection protocol where the Rust client uses it (`new_collection` / `collection_more` / `collection_reject`)
 
 ### Phase 6: Combinators
 
-- [ ] `->map(callable)` — Transform generated values
-- [ ] `->filter(callable)` — Keep values matching predicate (with retry limit)
-- [ ] `->flatMap(callable)` — Dependent generation
-- [ ] `OneOfGenerator.php` — oneOf(gen1, gen2, ...) with span labels
-- [ ] `OptionalGenerator.php` — optional(gen) returning ?T
-- [ ] `CompositeGenerator.php` — composite(function(TestCase $tc) { ... })
+- [x] `->map(callable)` — Transform generated values
+- [x] `->filter(callable)` — Keep values matching predicate (with retry limit)
+- [x] `->flatMap(callable)` — Dependent generation
+- [x] `OneOfGenerator.php` — oneOf(gen1, gen2, ...) with span labels
+- [x] `OptionalGenerator.php` — optional(gen) returning ?T
+- [x] `CompositeGenerator.php` — composite(function(TestCase $tc) { ... })
 
 ### Phase 7: Format Generators
 
-- [ ] `EmailGenerator.php` — emails()
-- [ ] `UrlGenerator.php` — urls()
-- [ ] `DomainGenerator.php` — domains()
-- [ ] `DateGenerator.php` — dates()
-- [ ] `TimeGenerator.php` — times()
-- [ ] `DateTimeGenerator.php` — datetimes()
-- [ ] `IpAddressGenerator.php` — ipAddresses() with ->v4() / ->v6()
-- [ ] `RegexGenerator.php` — fromRegex(pattern) with ->fullMatch()
+- [x] `EmailGenerator.php` — emails()
+- [x] `UrlGenerator.php` — urls()
+- [x] `DomainGenerator.php` — domains()
+- [x] `DateGenerator.php` — dates()
+- [x] `TimeGenerator.php` — times()
+- [x] `DateTimeGenerator.php` — datetimes()
+- [x] `IpAddressGenerator.php` — ipAddresses() with ->v4() / ->v6()
+- [x] `RegexGenerator.php` — fromRegex(pattern) with ->fullMatch()
 
 ### Phase 8: Pest Integration
 
@@ -308,7 +345,7 @@ $hegel->run();
 
 The goal: make hegel tests feel native in Pest. Several approaches:
 
-#### Option A: `hegel()` helper function (simplest)
+#### Option A: `hegel()` helper function
 
 ```php
 // tests/Property/CartTest.php
@@ -322,18 +359,21 @@ hegel('adding item increases count', function (TestCase $tc) {
 // With settings
 hegel('fuzz parser', function (TestCase $tc) {
     $input = $tc->draw(Generators::text());
-    $result = Parser::parse($input);
-    expect($result)->not->toThrow();
+    expect(fn () => Parser::parse($input))->not->toThrow();
 })->testCases(500)->seed(42);
 ```
 
 Implementation: `hegel()` creates a Pest `test()` that internally runs the Hegel
 lifecycle. Settings via chained methods that configure the underlying `Settings`.
 
+Status: implemented for v0.1. The helper now returns a thin wrapper that keeps
+Hegel-specific settings chainable while delegating normal Pest methods like
+`group()`, `skip()`, and `throws()` to the underlying `TestCall`.
+
 Pros: Simple, no Pest internals needed, easy to understand.
 Cons: Different syntax from regular `test()` / `it()`.
 
-#### Option B: Pest plugin with `#[Hegel]` attribute
+#### Option B: Pest plugin with chained `->hegel()` method
 
 ```php
 test('adding item increases count', function (TestCase $tc) {
@@ -365,36 +405,38 @@ Pros: Very Pest-native, uses `$this->draw()`.
 Cons: Requires a custom TestCase class, may conflict with Laravel's TestCase.
 The `draw()` method would need to lazily initialize the Hegel server on first call.
 
-**Recommendation: Start with Option A (`hegel()` helper) for v0.1.** It's the
-simplest, has zero Pest internal dependencies, and works today. Then explore
-Option B for v0.2 if ergonomics matter enough.
+Decision: ship Option A (`hegel()` helper) in v0.1. Keep Option B as a later
+ergonomic enhancement if we decide the extra Pest integration surface is worth
+the maintenance cost.
 
 ### Phase 9: Output and Reporting
 
-- [ ] Counterexample display on failure (draw values, notes)
-- [ ] Health check failure messages
-- [ ] Flaky test detection reporting
-- [ ] Server crash error messages
-- [ ] Integration with Pest's error output (format counterexamples nicely)
+- [x] Counterexample display on failure (draw values, notes)
+- [x] Health check failure messages
+- [x] Flaky test detection reporting
+- [x] Server crash error messages
+- [x] Integration with Pest's error output (format counterexamples nicely)
 
 ### Phase 10: Stateful Testing (v0.2)
 
-- [ ] State machine runner
-- [ ] Rule and invariant declaration (likely via attributes or method naming convention)
-- [ ] Variables (pools) for tracking dynamic resources
-- [ ] This is complex and should wait until the core is solid
+- [x] State machine runner
+- [x] Manual `Rule` and `Invariant` declaration via closures and a `StateMachine` interface
+- [x] Variables (pools) for tracking dynamic resources
+- [x] Attribute-based rule and invariant discovery for public methods
+- [ ] Convention-based discovery beyond attributes, if we decide the extra magic is worth it later
 
 ---
 
 ## Open Questions
 
-### 1. CBOR Library Performance
+### 1. CBOR Codec Overhead
 
 Property tests run 100+ test cases per test, each with multiple generate
 round-trips. CBOR encode/decode is in the hot path. Need to benchmark:
-- How fast is pure-PHP CBOR vs ext-cbor?
+- How fast is `nullbio/cbor-php` in the hot path?
 - Is it fast enough for 100 test cases with complex generators?
 - If not, can we cache schemas (they're static per generator)?
+- If it is still too slow, do we want an optional native accelerator later?
 
 ### 2. Server Lifecycle Scope
 
@@ -427,8 +469,10 @@ hegel-rust uses panics for assume failures and test failures. PHP equivalent:
 - Test assertion failure → catch the exception, report INTERESTING
 - Server crash → throw a descriptive RuntimeException
 
-Need a private exception class like `AssumeFailedException` that the runner
-catches but users never see.
+Current implementation uses private sentinel exceptions (`TestCaseControlFlow`
+and `StopTestException`) for this. The remaining question is whether the public
+error taxonomy should stay as raw `RuntimeException` messages or grow dedicated
+exception types later.
 
 ### 5. Parallel Test Execution
 
@@ -460,6 +504,9 @@ need TCP sockets. Defer Windows native support.
 - Test failure shrinking (verify minimal counterexample)
 - Health check triggering
 
+Static analysis:
+- PHPStan now runs at level 8 via `composer analyse`
+
 ### Property Tests (Phase 8+, self-hosting)
 - Once the Pest integration works, use hegel-php to test hegel-php
 - Packet roundtrip: `decode(encode(packet)) === packet`
@@ -470,10 +517,10 @@ need TCP sockets. Defer Windows native support.
 ## Dependencies
 
 ### Runtime
-- PHP >= 8.2 (need enums, fibers potentially, readonly properties)
-- `spomky-labs/cbor-php` or equivalent CBOR library
+- PHP 8.5.0
+- `nullbio/cbor-php` 3.3.0
 - `uv` on PATH (for hegel-core installation)
 
 ### Dev
-- `pestphp/pest` ^3.0
-- `phpstan/phpstan` (for template type checking)
+- `pestphp/pest` 4.4.3
+- `phpstan/phpstan` 2.1.43

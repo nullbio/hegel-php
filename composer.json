@@ -1,0 +1,49 @@
+{
+    "name": "nullbio/hegel-php",
+    "type": "library",
+    "description": "PHP SDK for the Hegel property-based testing protocol.",
+    "license": "MIT",
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/nullbio/cbor-php"
+        }
+    ],
+    "require": {
+        "php": "8.5.0",
+        "nullbio/cbor-php": "3.3.0",
+        "pestphp/pest": "4.4.3"
+    },
+    "require-dev": {
+        "phpstan/phpstan": "2.1.43"
+    },
+    "autoload": {
+        "files": [
+            "src/Pest/functions.php",
+            "src/Stateful/functions.php"
+        ],
+        "psr-4": {
+            "Hegel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Hegel\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "@php ./vendor/bin/pest",
+        "test:unit": "@php ./vendor/bin/pest tests/Unit",
+        "test:integration": "@php ./vendor/bin/pest tests/Integration",
+        "analyse": "@php ./vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G"
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.5.0"
+        },
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    }
+}
