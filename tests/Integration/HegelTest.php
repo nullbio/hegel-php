@@ -108,8 +108,56 @@ it('installs hegel-core with uv when there is no server command override', funct
                 ->toBe('0.2.2')
                 ->and(file_exists($projectDirectory . '/.hegel/venv/bin/hegel'))->toBeTrue()
                 ->and((string) file_get_contents($projectDirectory . '/.hegel/install.log'))
-                ->toContain('uv venv --clear')
+                ->toContain('uv venv --clear --no-project --python')
                 ->toContain('uv pip install --python');
+        });
+    });
+});
+
+it('reinstalls a cached hegel venv when the launcher points at a missing interpreter', function (): void {
+    hegelWithTemporaryProject(function (string $projectDirectory): void {
+        $captureFile = $projectDirectory . '/capture.json';
+        $binDirectory = $projectDirectory . '/bin';
+        $venvDirectory = $projectDirectory . '/.hegel/venv/bin';
+
+        expect(mkdir($binDirectory, 0777, true))->toBeTrue()
+            ->and(mkdir($venvDirectory, 0777, true))->toBeTrue();
+
+        file_put_contents($projectDirectory . '/.hegel/venv/hegel-version', '0.2.2');
+        file_put_contents(
+            $venvDirectory . '/hegel',
+            "#!/missing/python\nexit 0\n",
+        );
+        chmod($venvDirectory . '/hegel', 0755);
+        symlink('/missing/python', $venvDirectory . '/python');
+
+        hegelWriteFakeUv(
+            $binDirectory,
+            __DIR__ . '/../Fixtures/fake_hegel_server.php',
+        );
+
+        $originalPath = getenv('PATH');
+
+        hegelWithEnvironment([
+            'PATH' => $binDirectory . PATH_SEPARATOR . ($originalPath === false ? '' : $originalPath),
+            'HEGEL_SERVER_COMMAND' => null,
+            'HEGEL_FAKE_CAPTURE_FILE' => $captureFile,
+            'HEGEL_FAKE_HANDSHAKE' => null,
+        ], function () use ($projectDirectory): void {
+            $hegel = new Hegel();
+
+            try {
+                $events = $hegel->runTest();
+                $event = $events->receiveRequestCbor();
+                $events->writeReplyCbor($event['messageId'], ['result' => true]);
+            } finally {
+                $hegel->close();
+            }
+
+            expect((string) file_get_contents($projectDirectory . '/.hegel/install.log'))
+                ->toContain('uv venv --clear --no-project --python')
+                ->and((string) file_get_contents($projectDirectory . '/.hegel/venv/bin/hegel'))
+                ->toContain('fake_hegel_server.php');
         });
     });
 });

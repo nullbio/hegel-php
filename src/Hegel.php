@@ -472,8 +472,9 @@ final class Hegel
         $venvDirectory = self::serverDirectoryPath() . DIRECTORY_SEPARATOR . 'venv';
         $versionFile = $venvDirectory . DIRECTORY_SEPARATOR . 'hegel-version';
         $hegelBinary = $venvDirectory . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'hegel';
+        $pythonPath = $venvDirectory . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'python';
 
-        if (is_file($versionFile) && is_file($hegelBinary)) {
+        if (is_file($versionFile) && self::isUsableInstalledHegelBinary($hegelBinary, $pythonPath)) {
             $cachedVersion = file_get_contents($versionFile);
 
             if ($cachedVersion !== false && trim($cachedVersion) === self::SERVER_VERSION) {
@@ -495,8 +496,10 @@ final class Hegel
             throw new RuntimeException(self::UV_NOT_FOUND_MESSAGE);
         }
 
+        $installPython = self::findInstallPython();
+
         $venvExitCode = self::runLoggedCommand(
-            [$uvPath, 'venv', '--clear', $venvDirectory],
+            [$uvPath, 'venv', '--clear', '--no-project', '--python', $installPython, $venvDirectory],
             $installLogPath,
         );
 
@@ -506,8 +509,6 @@ final class Hegel
                 self::readLog($installLogPath),
             ));
         }
-
-        $pythonPath = $venvDirectory . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'python';
 
         $installExitCode = self::runLoggedCommand(
             [$uvPath, 'pip', 'install', '--python', $pythonPath, 'hegel-core==' . self::SERVER_VERSION],
@@ -523,8 +524,13 @@ final class Hegel
             ));
         }
 
-        if (! is_file($hegelBinary)) {
-            throw new RuntimeException(sprintf('hegel not found at %s after installation', $hegelBinary));
+        if (! self::isUsableInstalledHegelBinary($hegelBinary, $pythonPath)) {
+            throw new RuntimeException(sprintf(
+                'hegel not usable at %s after installation. Install log:%s%s',
+                $hegelBinary,
+                PHP_EOL,
+                self::readLog($installLogPath),
+            ));
         }
 
         if (file_put_contents($versionFile, self::SERVER_VERSION) === false) {
@@ -532,6 +538,19 @@ final class Hegel
         }
 
         return $hegelBinary;
+    }
+
+    private static function findInstallPython(): string
+    {
+        $python = self::findExecutableOnPath('python3') ?? self::findExecutableOnPath('python');
+
+        if ($python === null) {
+            throw new RuntimeException(
+                'Hegel requires a Python interpreter on PATH to create the local .hegel virtual environment.',
+            );
+        }
+
+        return $python;
     }
 
     /**
@@ -655,6 +674,69 @@ final class Hegel
         }
 
         return null;
+    }
+
+    private static function isUsableInstalledHegelBinary(string $hegelBinary, string $pythonPath): bool
+    {
+        return self::isUsableExecutable($pythonPath) && self::isUsableExecutable($hegelBinary);
+    }
+
+    private static function isUsableExecutable(string $path): bool
+    {
+        clearstatcache(true, $path);
+
+        if (! is_file($path) || ! is_executable($path)) {
+            return false;
+        }
+
+        $interpreter = self::shebangInterpreter($path);
+
+        if ($interpreter === null) {
+            return true;
+        }
+
+        clearstatcache(true, $interpreter);
+
+        return is_file($interpreter) && is_executable($interpreter);
+    }
+
+    private static function shebangInterpreter(string $path): ?string
+    {
+        $handle = @fopen($path, 'rb');
+
+        if (! is_resource($handle)) {
+            return null;
+        }
+
+        try {
+            $firstLine = fgets($handle);
+        } finally {
+            fclose($handle);
+        }
+
+        if (! is_string($firstLine) || ! str_starts_with($firstLine, '#!')) {
+            return null;
+        }
+
+        $command = trim(substr($firstLine, 2));
+
+        if ($command === '') {
+            return null;
+        }
+
+        $parts = preg_split('/\s+/', $command);
+
+        if ($parts === false) {
+            return null;
+        }
+
+        $interpreter = $parts[0];
+
+        if ($interpreter === '/usr/bin/env' && isset($parts[1]) && $parts[1] !== '') {
+            return self::findExecutableOnPath($parts[1]);
+        }
+
+        return $interpreter;
     }
 
     /**
