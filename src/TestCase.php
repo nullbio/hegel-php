@@ -4,10 +4,11 @@ declare(strict_types=1);
 
 namespace Hegel;
 
+use Hegel\Exception\ProtocolException;
 use Hegel\Generator\Generator as HegelGenerator;
 use Hegel\Protocol\Channel;
 use Hegel\Protocol\Connection;
-use RuntimeException;
+use Hegel\Random\Randomizer;
 use Throwable;
 
 final class TestCase
@@ -69,6 +70,11 @@ final class TestCase
         $this->appendOutput($message);
     }
 
+    public function randomizer(bool $useTrueRandom = false): Randomizer
+    {
+        return new Randomizer(clone $this, $useTrueRandom);
+    }
+
     public function child(int $extraIndent): self
     {
         $child = clone $this;
@@ -94,7 +100,7 @@ final class TestCase
     public function stopSpan(bool $discard): void
     {
         if ($this->spanDepth <= 0) {
-            throw new RuntimeException('Cannot stop a span when no span is active.');
+            throw new ProtocolException('Cannot stop a span when no span is active.');
         }
 
         $this->spanDepth--;
@@ -118,7 +124,7 @@ final class TestCase
 
         try {
             return $this->state->channel->requestCbor($request);
-        } catch (RuntimeException $exception) {
+        } catch (\RuntimeException $exception) {
             $message = $exception->getMessage();
 
             if (
@@ -134,10 +140,10 @@ final class TestCase
             }
 
             if ($this->state->connection->serverHasExited()) {
-                throw new RuntimeException(Connection::SERVER_EXITED_MESSAGE, 0, $exception);
+                throw new ProtocolException(Connection::SERVER_EXITED_MESSAGE, 0, $exception);
             }
 
-            throw new RuntimeException(sprintf('Failed to communicate with Hegel: %s', $message), 0, $exception);
+            throw new ProtocolException(sprintf('Failed to communicate with Hegel: %s', $message), 0, $exception);
         }
     }
 
@@ -161,12 +167,12 @@ final class TestCase
                 'status' => $status,
                 'origin' => $origin,
             ]);
-        } catch (RuntimeException) {
+        } catch (\RuntimeException) {
         }
 
         try {
             $this->state->channel->close();
-        } catch (RuntimeException) {
+        } catch (\RuntimeException) {
         }
     }
 
@@ -221,7 +227,7 @@ final class TestCase
     }
 }
 
-final class StopTestException extends RuntimeException
+final class StopTestException extends ProtocolException
 {
     public function __construct(int $code = 0, ?Throwable $previous = null)
     {
@@ -229,7 +235,7 @@ final class StopTestException extends RuntimeException
     }
 }
 
-final class TestCaseControlFlow extends RuntimeException
+final class TestCaseControlFlow extends ProtocolException
 {
 }
 

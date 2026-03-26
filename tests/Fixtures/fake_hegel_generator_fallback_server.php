@@ -6,27 +6,10 @@ use Hegel\Protocol\CborCodec;
 use Hegel\Protocol\Packet;
 
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
+require __DIR__ . '/fake_hegel_transport.php';
 
-$socketPath = $argv[1] ?? null;
-
-if (! is_string($socketPath) || $socketPath === '') {
-    fwrite(STDERR, "missing socket path\n");
-    exit(1);
-}
-
-$server = @stream_socket_server('unix://' . $socketPath, $errorCode, $errorMessage);
-
-if ($server === false) {
-    fwrite(STDERR, sprintf("failed to create socket: %s\n", $errorMessage));
-    exit(1);
-}
-
-$connection = @stream_socket_accept($server, 5);
-
-if ($connection === false) {
-    fwrite(STDERR, "failed to accept connection\n");
-    exit(1);
-}
+$argv = $_SERVER['argv'] ?? [];
+['reader' => $reader, 'writer' => $writer, 'close' => $closeTransport] = hegelFakeOpenTransport($argv);
 
 $capture = [
     'commands' => [],
@@ -36,51 +19,84 @@ $capture = [
     'collection_more' => [],
 ];
 
-$handshake = Packet::readFrom($connection);
-Packet::writeTo($connection, new Packet(0, $handshake->messageId, true, 'Hegel/0.7'));
+$mode = getenv('HEGEL_FAKE_GENERATOR_FALLBACK_MODE');
 
-$runTest = Packet::readFrom($connection);
+if (! is_string($mode) || $mode === '') {
+    $mode = 'happy';
+}
+
+$handshake = Packet::readFrom($reader);
+Packet::writeTo($writer, new Packet(0, $handshake->messageId, true, 'Hegel/0.7'));
+
+$runTest = Packet::readFrom($reader);
 $runTestPayload = CborCodec::decode($runTest->payload);
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet(0, $runTest->messageId, true, CborCodec::encode(['result' => null])),
 );
 
 $eventChannelId = $runTestPayload['channel_id'];
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet($eventChannelId, 1, false, CborCodec::encode([
         'event' => 'test_case',
         'channel_id' => 8,
     ])),
 );
 
-$testCaseAck = Packet::readFrom($connection);
+$testCaseAck = Packet::readFrom($reader);
 $capture['test_case_ack'] = CborCodec::decode($testCaseAck->payload);
 
-$generateResponses = [
-    10,
-    20,
-    1,
-    3,
-    4,
-    2,
-    [5, 6],
-    2,
-    'left',
-    1,
-    'right',
-    2,
-    1,
-    9,
-    true,
-    'opt',
-];
-
-$collectionMoreResponses = [true, true, false];
+[$generateResponses, $collectionMoreResponses] = match ($mode) {
+    'mapped' => [
+        [5],
+        [],
+    ],
+    'filter_exhaustion' => [
+        [1, 1, 1],
+        [],
+    ],
+    'flat_map_invalid_callback' => [
+        [2],
+        [],
+    ],
+    'map_collision' => [
+        array_merge([2, 'dup', 1], array_fill(0, 19, 'dup')),
+        [],
+    ],
+    'optional_none' => [
+        [false],
+        [],
+    ],
+    'parity_generators' => [
+        [2, 30, 40, 7, 'xy', 60, 70, 'john', 80],
+        [],
+    ],
+    default => [
+        [
+            10,
+            20,
+            1,
+            3,
+            4,
+            2,
+            [5, 6],
+            2,
+            'left',
+            1,
+            'right',
+            2,
+            1,
+            9,
+            true,
+            'opt',
+        ],
+        [true, true, false],
+    ],
+};
 
 while (true) {
-    $packet = Packet::readFrom($connection);
+    $packet = Packet::readFrom($reader);
 
     if ($packet->channelId !== 8) {
         fwrite(STDERR, sprintf("unexpected channel: %d\n", $packet->channelId));
@@ -104,7 +120,7 @@ while (true) {
         $response = array_shift($generateResponses);
 
         Packet::writeTo(
-            $connection,
+            $writer,
             new Packet(8, $packet->messageId, true, CborCodec::encode(['result' => $response])),
         );
         continue;
@@ -114,7 +130,7 @@ while (true) {
         $capture['start_spans'][] = $payload;
 
         Packet::writeTo(
-            $connection,
+            $writer,
             new Packet(8, $packet->messageId, true, CborCodec::encode(['result' => null])),
         );
         continue;
@@ -124,7 +140,7 @@ while (true) {
         $capture['stop_spans'][] = $payload;
 
         Packet::writeTo(
-            $connection,
+            $writer,
             new Packet(8, $packet->messageId, true, CborCodec::encode(['result' => null])),
         );
         continue;
@@ -134,7 +150,7 @@ while (true) {
         $capture['new_collection'] = $payload;
 
         Packet::writeTo(
-            $connection,
+            $writer,
             new Packet(8, $packet->messageId, true, CborCodec::encode(['result' => 'composite-list'])),
         );
         continue;
@@ -145,7 +161,7 @@ while (true) {
         $response = array_shift($collectionMoreResponses);
 
         Packet::writeTo(
-            $connection,
+            $writer,
             new Packet(8, $packet->messageId, true, CborCodec::encode(['result' => $response])),
         );
         continue;
@@ -155,7 +171,7 @@ while (true) {
         $capture['mark_complete'] = $payload;
 
         Packet::writeTo(
-            $connection,
+            $writer,
             new Packet(8, $packet->messageId, true, CborCodec::encode(['result' => null])),
         );
         continue;
@@ -166,7 +182,7 @@ while (true) {
 }
 
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet($eventChannelId, 2, false, CborCodec::encode([
         'event' => 'test_done',
         'results' => [
@@ -179,7 +195,7 @@ Packet::writeTo(
     ])),
 );
 
-$testDoneAck = Packet::readFrom($connection);
+$testDoneAck = Packet::readFrom($reader);
 $capture['test_done_ack'] = CborCodec::decode($testDoneAck->payload);
 
 $captureFile = getenv('HEGEL_FAKE_CAPTURE_FILE');
@@ -188,5 +204,4 @@ if (is_string($captureFile) && $captureFile !== '') {
     file_put_contents($captureFile, json_encode($capture, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
 }
 
-fclose($connection);
-fclose($server);
+$closeTransport();

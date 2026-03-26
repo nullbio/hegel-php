@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace Hegel\Generator;
 
 use Closure;
+use Hegel\Exception\GenerationException;
 use Hegel\SpanLabel;
 use Hegel\TestCase;
-use RuntimeException;
 
 final class FlatMappedGenerator extends AbstractGenerator
 {
@@ -26,7 +26,7 @@ final class FlatMappedGenerator extends AbstractGenerator
         $next = ($this->mapper)($this->source->draw($testCase));
 
         if (! $next instanceof Generator) {
-            throw new RuntimeException(sprintf(
+            throw new GenerationException(sprintf(
                 'flatMap callback must return a generator, got %s.',
                 get_debug_type($next),
             ));

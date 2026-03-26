@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hegel\Protocol;
 
+use Hegel\Exception\ProtocolException;
 use RuntimeException;
 
 final class Channel
@@ -32,7 +33,7 @@ final class Channel
     public function sendRequest(string $payload): int
     {
         if ($this->closed) {
-            throw new RuntimeException('channel is closed');
+            throw new ProtocolException('channel is closed');
         }
 
         $messageId = $this->nextMessageId;
@@ -67,7 +68,7 @@ final class Channel
         }
 
         if ($this->closed) {
-            throw new RuntimeException('channel is closed');
+            throw new ProtocolException('channel is closed');
         }
 
         while (true) {
@@ -97,7 +98,7 @@ final class Channel
         $reply = $this->receiveReplyCbor($messageId);
 
         if (is_array($reply) && array_key_exists('error', $reply)) {
-            throw new RuntimeException(self::formatProtocolError($reply['error'], $reply['type'] ?? null));
+            throw new ProtocolException(self::formatProtocolError($reply['error'], $reply['type'] ?? null));
         }
 
         if (is_array($reply) && array_key_exists('result', $reply)) {
@@ -114,7 +115,7 @@ final class Channel
         }
 
         if ($this->closed) {
-            throw new RuntimeException('channel is closed');
+            throw new ProtocolException('channel is closed');
         }
 
         while (true) {

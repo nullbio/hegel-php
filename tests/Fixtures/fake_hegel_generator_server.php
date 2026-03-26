@@ -7,84 +7,105 @@ use Hegel\Protocol\CborCodec;
 use Hegel\Protocol\Packet;
 
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
+require __DIR__ . '/fake_hegel_transport.php';
 
-$socketPath = $argv[1] ?? null;
-
-if (! is_string($socketPath) || $socketPath === '') {
-    fwrite(STDERR, "missing socket path\n");
-    exit(1);
-}
-
-$server = @stream_socket_server('unix://' . $socketPath, $errorCode, $errorMessage);
-
-if ($server === false) {
-    fwrite(STDERR, sprintf("failed to create socket: %s\n", $errorMessage));
-    exit(1);
-}
-
-$connection = @stream_socket_accept($server, 5);
-
-if ($connection === false) {
-    fwrite(STDERR, "failed to accept connection\n");
-    exit(1);
-}
+$argv = $_SERVER['argv'] ?? [];
+['reader' => $reader, 'writer' => $writer, 'close' => $closeTransport] = hegelFakeOpenTransport($argv);
 
 $capture = [
     'generate_requests' => [],
 ];
 
-$handshake = Packet::readFrom($connection);
-Packet::writeTo($connection, new Packet(0, $handshake->messageId, true, 'Hegel/0.7'));
+$mode = getenv('HEGEL_FAKE_GENERATOR_SERVER_MODE');
 
-$runTest = Packet::readFrom($connection);
+if (! is_string($mode) || $mode === '') {
+    $mode = 'default';
+}
+
+$handshake = Packet::readFrom($reader);
+Packet::writeTo($writer, new Packet(0, $handshake->messageId, true, 'Hegel/0.7'));
+
+$runTest = Packet::readFrom($reader);
 $runTestPayload = CborCodec::decode($runTest->payload);
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet(0, $runTest->messageId, true, CborCodec::encode(['result' => null])),
 );
 
 $eventChannelId = $runTestPayload['channel_id'];
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet($eventChannelId, 1, false, CborCodec::encode([
         'event' => 'test_case',
         'channel_id' => 8,
     ])),
 );
 
-$testCaseAck = Packet::readFrom($connection);
+$testCaseAck = Packet::readFrom($reader);
 $capture['test_case_ack'] = CborCodec::decode($testCaseAck->payload);
 
-$responses = [
-    7,
-    3.5,
-    true,
-    'hello',
-    ByteStringObject::create("\xFF\x00"),
-    1,
-    [1, 2, 3],
-    [
-        ['alpha', 11],
-        ['beta', 22],
+$responses = match ($mode) {
+    'parity_generators' => [
+        [1, 2, 3],
+        [7, 'pair', true],
+        [9, 8],
+        ['Ada', 37],
+        [],
     ],
-    4,
-    [1, 'picked'],
-    [0, null],
-    [1, 'later'],
-    'user@example.test',
-    'https://example.test/path',
-    'example.test',
-    '2025-01-02',
-    '03:04:05',
-    '2025-01-02T03:04:05+00:00',
-    '2001:db8::1',
-    '192.0.2.1',
-    '2001:db8::2',
-    'aaaa',
-];
+    'default_object_generators' => [
+        [1, 2],
+        1,
+        ['Ada', 25],
+        ['user@example.test', 30],
+        [7, 1],
+        null,
+    ],
+    'randomizer' => [
+        2,
+        1.5,
+        ByteStringObject::create("\xAA\xBB"),
+        2,
+        0,
+        3,
+        0,
+        1,
+        1,
+        0,
+    ],
+    'randomizer_true' => [
+        123,
+    ],
+    default => [
+        7,
+        3.5,
+        true,
+        'hello',
+        ByteStringObject::create("\xFF\x00"),
+        1,
+        [1, 2, 3],
+        [
+            ['alpha', 11],
+            ['beta', 22],
+        ],
+        4,
+        [1, 'picked'],
+        [0, null],
+        [1, 'later'],
+        'user@example.test',
+        'https://example.test/path',
+        'example.test',
+        '2025-01-02',
+        '03:04:05',
+        '2025-01-02T03:04:05+00:00',
+        '2001:db8::1',
+        '192.0.2.1',
+        '2001:db8::2',
+        'aaaa',
+    ],
+};
 
 while (true) {
-    $packet = Packet::readFrom($connection);
+    $packet = Packet::readFrom($reader);
 
     if ($packet->channelId !== 8) {
         fwrite(STDERR, sprintf("unexpected channel: %d\n", $packet->channelId));
@@ -107,7 +128,7 @@ while (true) {
         $response = array_shift($responses);
 
         Packet::writeTo(
-            $connection,
+            $writer,
             new Packet(8, $packet->messageId, true, CborCodec::encode(['result' => $response])),
         );
         continue;
@@ -117,7 +138,7 @@ while (true) {
         $capture['mark_complete'] = $payload;
 
         Packet::writeTo(
-            $connection,
+            $writer,
             new Packet(8, $packet->messageId, true, CborCodec::encode(['result' => null])),
         );
         continue;
@@ -128,7 +149,7 @@ while (true) {
 }
 
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet($eventChannelId, 2, false, CborCodec::encode([
         'event' => 'test_done',
         'results' => [
@@ -141,7 +162,7 @@ Packet::writeTo(
     ])),
 );
 
-$testDoneAck = Packet::readFrom($connection);
+$testDoneAck = Packet::readFrom($reader);
 $capture['test_done_ack'] = CborCodec::decode($testDoneAck->payload);
 
 $captureFile = getenv('HEGEL_FAKE_CAPTURE_FILE');
@@ -150,5 +171,4 @@ if (is_string($captureFile) && $captureFile !== '') {
     file_put_contents($captureFile, json_encode($capture, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
 }
 
-fclose($connection);
-fclose($server);
+$closeTransport();

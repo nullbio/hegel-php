@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace Hegel\Generator;
 
+use Hegel\Exception\GenerationException;
 use Hegel\SpanLabel;
 use Hegel\TestCase;
 use InvalidArgumentException;
-use RuntimeException;
 
 final class HashMapGenerator extends AbstractGenerator
 {
@@ -78,7 +78,7 @@ final class HashMapGenerator extends AbstractGenerator
         }
 
         if (count($map) < $this->minSize) {
-            throw new RuntimeException('Failed to generate enough unique map keys.');
+            throw new GenerationException('Failed to generate enough unique map keys.');
         }
 
         $testCase->stopSpan(false);

@@ -44,7 +44,8 @@ it('spawns the server, negotiates the protocol, and sends run_test on the contro
                 $hegel->close();
             }
 
-            expect($capture['argv'][1])->toBe('--verbosity')
+            expect($capture['argv'][0])->toBe('--stdio')
+                ->and($capture['argv'][1])->toBe('--verbosity')
                 ->and($capture['argv'][2])->toBe('debug')
                 ->and($capture['handshake']['channel_id'])->toBe(0)
                 ->and($capture['handshake']['message_id'])->toBe(1)
@@ -67,9 +68,42 @@ it('spawns the server, negotiates the protocol, and sends run_test on the contro
                 ->and($capture['event_ack']['is_reply'])->toBeTrue()
                 ->and($capture['event_ack']['payload'])->toBe(['result' => true])
                 ->and(file_exists($projectDirectory . '/.hegel/install.log'))->toBeFalse()
-                ->and((string) file_get_contents($projectDirectory . '/.hegel/server.log'))
-                ->toContain('fake-hegel-server ready')
-                ->toContain('fake-hegel-server stderr');
+                ->and((string) file_get_contents($projectDirectory . '/.hegel/server.log'))->toContain(
+                    'fake-hegel-server ready',
+                )->toContain('fake-hegel-server stderr');
+        });
+    });
+});
+
+it('can still use unix socket transport when requested', function (): void {
+    hegelWithTemporaryProject(function (string $projectDirectory): void {
+        $captureFile = $projectDirectory . '/capture.json';
+        $serverCommand = hegelWritePhpWrapper(
+            $projectDirectory,
+            __DIR__ . '/../Fixtures/fake_hegel_server.php',
+            'fake-hegel',
+        );
+
+        hegelWithEnvironment([
+            'HEGEL_SERVER_COMMAND' => $serverCommand,
+            'HEGEL_SERVER_TRANSPORT' => 'socket',
+            'HEGEL_FAKE_CAPTURE_FILE' => $captureFile,
+            'HEGEL_FAKE_HANDSHAKE' => null,
+        ], function () use ($captureFile): void {
+            $hegel = new Hegel();
+
+            try {
+                $events = $hegel->runTest();
+                $event = $events->receiveRequestCbor();
+                $events->writeReplyCbor($event['messageId'], ['result' => true]);
+                $capture = hegelReadJsonFile($captureFile);
+            } finally {
+                $hegel->close();
+            }
+
+            expect($capture['argv'][0])->toEndWith('hegel.sock')
+                ->and($capture['argv'][1])->toBe('--verbosity')
+                ->and($capture['argv'][2])->toBe('normal');
         });
     });
 });
@@ -105,7 +139,7 @@ it('installs hegel-core with uv when there is no server command override', funct
             }
 
             expect(file_get_contents($projectDirectory . '/.hegel/venv/hegel-version'))
-                ->toBe('0.2.2')
+                ->toBe('0.2.3')
                 ->and(file_exists($projectDirectory . '/.hegel/venv/bin/hegel'))->toBeTrue()
                 ->and((string) file_get_contents($projectDirectory . '/.hegel/install.log'))
                 ->toContain('uv venv --clear --no-project --python')

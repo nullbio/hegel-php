@@ -3,8 +3,9 @@
 ## Overview
 
 Build a PHP SDK for the Hegel property-based testing protocol. The SDK connects
-to hegel-core (a Python server built on Hypothesis) via Unix socket and provides
-PHP-native generators and test integration for Pest v4.
+to hegel-core (a Python server built on Hypothesis) via stdio by default, with
+an explicit Unix-socket fallback, and provides PHP-native generators and test
+integration for Pest v4.
 
 The reference implementation is hegel-rust (`/tmp/hegel-rust/` or clone from
 https://github.com/hegeldev/hegel-rust). Follow its protocol behavior exactly.
@@ -47,10 +48,8 @@ the signedness and byte order need validation.
 
 ### Connection Model
 
-- Transport: Unix domain socket
-- The SDK creates a temporary directory, puts a socket path in it, and spawns
-  the hegel-core server binary with that socket path as arg
-- The server creates the socket and listens; the SDK connects to it
+- Default transport: subprocess stdio (`hegel-core --stdio`)
+- Compatibility fallback: Unix domain socket via `HEGEL_SERVER_TRANSPORT=socket`
 - One connection per test run, multiplexed into channels
 
 ### Channel Multiplexing
@@ -207,13 +206,14 @@ Labels are constants (from hegel-rust `labels` module):
 hegel-rust auto-installs hegel-core using `uv`:
 1. Creates `.hegel/venv` directory
 2. `uv venv --clear .hegel/venv`
-3. `uv pip install --python .hegel/venv/bin/python hegel-core==0.2.2`
+3. `uv pip install --python .hegel/venv/bin/python hegel-core==0.2.3`
 4. Binary is at `.hegel/venv/bin/hegel`
 5. Caches version in `.hegel/venv/hegel-version`
 6. Override with `HEGEL_SERVER_COMMAND` env var
 
-Server is spawned with: `<binary> <socket_path> --verbosity <level>`
-Server stdout/stderr go to `.hegel/server.log`
+Server is spawned with: `<binary> --stdio --verbosity <level>`
+Socket fallback is spawned with: `<binary> <socket_path> --verbosity <level>`
+Server stderr goes to `.hegel/server.log`
 
 ---
 
@@ -251,7 +251,7 @@ Use `nullbio/hegel-php`.
 The foundation. Everything else depends on this.
 
 - [x] `Packet.php` — read/write binary packets with CRC32 checksums
-- [x] `Connection.php` — Unix socket connection with channel multiplexing
+- [x] `Connection.php` — Packet transport with channel multiplexing
 - [x] `Channel.php` — Request/reply abstraction with CBOR encode/decode
 - [x] Unit tests with mock socket pairs (use `stream_socket_pair()`)
 - [x] CRC32 compatibility test against a known packet from hegel-rust
@@ -262,7 +262,7 @@ and a live integration test that runs a real Pest property against `hegel-core`.
 
 ### Phase 2: Server Lifecycle
 
-- [x] `Hegel.php` — Server spawning, socket connection, handshake
+- [x] `Hegel.php` — Server spawning, stdio/socket connection, handshake
 - [x] Auto-installation of hegel-core via `uv`
 - [x] `HEGEL_SERVER_COMMAND` env var override
 - [x] Server process monitoring (detect crashes)
@@ -423,7 +423,16 @@ the maintenance cost.
 - [x] Manual `Rule` and `Invariant` declaration via closures and a `StateMachine` interface
 - [x] Variables (pools) for tracking dynamic resources
 - [x] Attribute-based rule and invariant discovery for public methods
-- [ ] Convention-based discovery beyond attributes, if we decide the extra magic is worth it later
+- [x] Convention-based discovery via public `ruleXxx()` / `invariantXxx()` methods when no attributes are present
+
+## Remaining Rust Parity Gaps
+
+- Windows-native support outside WSL2
+- Performance follow-ups like schema caching or optional native accelerators if profiling warrants them
+
+Deliberate PHP non-goals:
+- Mirroring Rust's typed numeric generator matrix (`i8`..`u128`, `usize`, etc.). PHP should stay PHP-native here and expose `int` / `float` surfaces instead of Rust-shaped numeric APIs.
+- Forcing `test(...)->hegel(...)` onto Pest 4 `TestCall` internals. `TestCall` is internal/final in the current Pest version, so the supported PHP-native ergonomics are the global `hegel()` helper and `Hegel\Testing\InteractsWithHegel`.
 
 ---
 
@@ -432,11 +441,15 @@ the maintenance cost.
 ### 1. CBOR Codec Overhead
 
 Property tests run 100+ test cases per test, each with multiple generate
-round-trips. CBOR encode/decode is in the hot path. Need to benchmark:
-- How fast is `nullbio/cbor-php` in the hot path?
-- Is it fast enough for 100 test cases with complex generators?
-- If not, can we cache schemas (they're static per generator)?
-- If it is still too slow, do we want an optional native accelerator later?
+round-trips. CBOR encode/decode is in the hot path. We now ship
+`composer bench`, which measures the CBOR path and repeated generator
+`basic()->schema()` construction. Current benchmark results showed:
+- CBOR object construction is the bigger hot path.
+- Reusing `Encoder` / `Decoder` instances yields a modest win, so `CborCodec`
+  now reuses them internally.
+- Repeated generator schema construction is comparatively cheap, so schema
+  caching stays deferred until future profiling says otherwise.
+- The current numbers do not justify an optional native accelerator.
 
 ### 2. Server Lifecycle Scope
 
@@ -470,15 +483,15 @@ hegel-rust uses panics for assume failures and test failures. PHP equivalent:
 - Server crash → throw a descriptive RuntimeException
 
 Current implementation uses private sentinel exceptions (`TestCaseControlFlow`
-and `StopTestException`) for this. The remaining question is whether the public
-error taxonomy should stay as raw `RuntimeException` messages or grow dedicated
-exception types later.
+and `StopTestException`) for control flow, and public runtime failures are now
+split into `ProtocolException`, `GenerationException`, and `StatefulException`.
 
 ### 5. Parallel Test Execution
 
 Pest can run tests in parallel via `--parallel`. Each parallel worker would
 need its own hegel-core server. The per-`hegel()` lifecycle handles this
-naturally (each call spawns its own server with its own temp socket).
+naturally (each call spawns its own server process; socket fallback still uses
+its own temp socket per call).
 
 ### 6. Windows Support
 

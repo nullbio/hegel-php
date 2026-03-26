@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Hegel;
 
-use RuntimeException;
+use Hegel\Exception\ProtocolException;
 
 final class Collection
 {
@@ -35,7 +35,7 @@ final class Collection
         }
 
         if (! is_bool($response)) {
-            throw new RuntimeException(sprintf(
+            throw new ProtocolException(sprintf(
                 'Expected bool from collection_more, got %s.',
                 get_debug_type($response),
             ));
@@ -88,7 +88,7 @@ final class Collection
         }
 
         if (! is_string($response)) {
-            throw new RuntimeException(sprintf(
+            throw new ProtocolException(sprintf(
                 'Expected text response from new_collection, got %s.',
                 get_debug_type($response),
             ));

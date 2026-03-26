@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace Hegel\Stateful;
 
+use Hegel\Exception\StatefulException;
 use Hegel\StopTestException;
 use Hegel\TestCase;
 use Hegel\TestCaseControlFlow;
-use RuntimeException;
 
 final class Variables
 {
@@ -33,7 +33,7 @@ final class Variables
         );
 
         if (array_key_exists($variableId, $this->values)) {
-            throw new RuntimeException('Unexpected duplicate variable id.');
+            throw new StatefulException('Unexpected duplicate variable id.');
         }
 
         $this->values[$variableId] = $value;
@@ -45,7 +45,7 @@ final class Variables
         $variableId = $this->poolGenerate(false);
 
         if (! array_key_exists($variableId, $this->values)) {
-            throw new RuntimeException(sprintf('Unknown variable id %d.', $variableId));
+            throw new StatefulException(sprintf('Unknown variable id %d.', $variableId));
         }
 
         return $this->values[$variableId];
@@ -57,7 +57,7 @@ final class Variables
         $variableId = $this->poolGenerate(true);
 
         if (! array_key_exists($variableId, $this->values)) {
-            throw new RuntimeException(sprintf('Unknown variable id %d.', $variableId));
+            throw new StatefulException(sprintf('Unknown variable id %d.', $variableId));
         }
 
         $value = $this->values[$variableId];
@@ -99,7 +99,7 @@ final class Variables
             return (int) $value;
         }
 
-        throw new RuntimeException(sprintf(
+        throw new StatefulException(sprintf(
             'Expected integer %s response, got %s.',
             $context,
             get_debug_type($value),

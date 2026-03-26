@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hegel\Generator;
 
+use Hegel\Exception\GenerationException;
 use Hegel\SpanLabel;
 use Hegel\TestCase;
 use InvalidArgumentException;
@@ -73,6 +74,10 @@ final class OneOfGenerator extends AbstractGenerator
             static function (mixed $value) use ($basics): mixed {
                 [$tag, $payload] = GeneratorValue::expectTuple($value, 'oneOf tagged tuple', 2);
                 $index = GeneratorValue::toInteger($tag, 'oneOf tag');
+
+                if (! array_key_exists($index, $basics)) {
+                    throw new GenerationException(sprintf('Generated oneOf tag %d is out of range.', $index));
+                }
 
                 return $basics[$index]->parse($payload);
             },

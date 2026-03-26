@@ -6,27 +6,10 @@ use Hegel\Protocol\CborCodec;
 use Hegel\Protocol\Packet;
 
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
+require __DIR__ . '/fake_hegel_transport.php';
 
-$socketPath = $argv[1] ?? null;
-
-if (! is_string($socketPath) || $socketPath === '') {
-    fwrite(STDERR, "missing socket path\n");
-    exit(1);
-}
-
-$server = @stream_socket_server('unix://' . $socketPath, $errorCode, $errorMessage);
-
-if ($server === false) {
-    fwrite(STDERR, sprintf("failed to create socket: %s\n", $errorMessage));
-    exit(1);
-}
-
-$connection = @stream_socket_accept($server, 5);
-
-if ($connection === false) {
-    fwrite(STDERR, "failed to accept connection\n");
-    exit(1);
-}
+$argv = $_SERVER['argv'] ?? [];
+['reader' => $reader, 'writer' => $writer, 'close' => $closeTransport] = hegelFakeOpenTransport($argv);
 
 $mode = getenv('HEGEL_FAKE_RUNNER_MODE');
 
@@ -39,16 +22,16 @@ $capture = [
     'cases' => [],
 ];
 
-$handshake = Packet::readFrom($connection);
+$handshake = Packet::readFrom($reader);
 $capture['handshake'] = [
     'channel_id' => $handshake->channelId,
     'message_id' => $handshake->messageId,
     'payload' => $handshake->payload,
 ];
 
-Packet::writeTo($connection, new Packet(0, $handshake->messageId, true, 'Hegel/0.7'));
+Packet::writeTo($writer, new Packet(0, $handshake->messageId, true, 'Hegel/0.7'));
 
-$runTest = Packet::readFrom($connection);
+$runTest = Packet::readFrom($reader);
 $runTestPayload = CborCodec::decode($runTest->payload);
 $capture['run_test'] = [
     'channel_id' => $runTest->channelId,
@@ -57,27 +40,27 @@ $capture['run_test'] = [
 ];
 
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet(0, $runTest->messageId, true, CborCodec::encode(['result' => null])),
 );
 
 $eventChannelId = $runTestPayload['channel_id'];
 $nextEventId = 1;
 
-$sendEvent = static function (array $payload) use ($connection, $eventChannelId, &$nextEventId): int {
+$sendEvent = static function (array $payload) use ($writer, $eventChannelId, &$nextEventId): int {
     $messageId = $nextEventId;
     $nextEventId++;
 
     Packet::writeTo(
-        $connection,
+        $writer,
         new Packet($eventChannelId, $messageId, false, CborCodec::encode($payload)),
     );
 
     return $messageId;
 };
 
-$readEventAck = static function () use ($connection): array {
-    $packet = Packet::readFrom($connection);
+$readEventAck = static function () use ($reader): array {
+    $packet = Packet::readFrom($reader);
 
     return [
         'channel_id' => $packet->channelId,
@@ -87,7 +70,7 @@ $readEventAck = static function () use ($connection): array {
     ];
 };
 
-$handleCase = static function (int $channelId, string $expectedStatus) use ($connection, $sendEvent, $readEventAck, &$capture): void {
+$handleCase = static function (int $channelId, string $expectedStatus) use ($reader, $writer, $sendEvent, $readEventAck, &$capture): void {
     $eventId = $sendEvent([
         'event' => 'test_case',
         'channel_id' => $channelId,
@@ -99,7 +82,7 @@ $handleCase = static function (int $channelId, string $expectedStatus) use ($con
         'ack' => $readEventAck(),
     ];
 
-    $markComplete = Packet::readFrom($connection);
+    $markComplete = Packet::readFrom($reader);
     $markCompletePayload = CborCodec::decode($markComplete->payload);
     $caseCapture['mark_complete'] = [
         'channel_id' => $markComplete->channelId,
@@ -108,11 +91,11 @@ $handleCase = static function (int $channelId, string $expectedStatus) use ($con
     ];
 
     Packet::writeTo(
-        $connection,
+        $writer,
         new Packet($channelId, $markComplete->messageId, true, CborCodec::encode(['result' => null])),
     );
 
-    $closePacket = Packet::readFrom($connection);
+    $closePacket = Packet::readFrom($reader);
     $caseCapture['close'] = [
         'channel_id' => $closePacket->channelId,
         'message_id' => $closePacket->messageId,
@@ -234,5 +217,4 @@ if (is_string($captureFile) && $captureFile !== '') {
     file_put_contents($captureFile, json_encode($capture, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
 }
 
-fclose($connection);
-fclose($server);
+$closeTransport();

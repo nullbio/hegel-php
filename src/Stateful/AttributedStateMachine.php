@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hegel\Stateful;
 
+use Hegel\Exception\StatefulException;
 use Hegel\Stateful\Attributes\Invariant as InvariantAttribute;
 use Hegel\Stateful\Attributes\Rule as RuleAttribute;
 use Hegel\TestCase;
@@ -14,8 +15,8 @@ use ReflectionObject;
 use ReflectionParameter;
 use ReflectionType;
 use ReflectionUnionType;
-use RuntimeException;
 use function count;
+use function ctype_upper;
 use function is_a;
 use function sprintf;
 use function strcmp;
@@ -37,6 +38,10 @@ final class AttributedStateMachine implements StateMachine
         $rules = [];
         $invariants = [];
         $discovered = self::discoverAttributedMethods($machine);
+
+        if ($discovered === []) {
+            $discovered = self::discoverConventionMethods($machine);
+        }
 
         foreach ($discovered as $definition) {
             if ($definition['kind'] === 'rule') {
@@ -61,8 +66,8 @@ final class AttributedStateMachine implements StateMachine
         if ($rules === []) {
             $class = $machine::class;
 
-            throw new RuntimeException(sprintf(
-                'Stateful machine %s must implement %s or expose at least one public #[Rule] method.',
+            throw new StatefulException(sprintf(
+                'Stateful machine %s must implement %s or expose at least one public #[Rule] or ruleXxx method.',
                 $class,
                 StateMachine::class,
             ));
@@ -98,7 +103,7 @@ final class AttributedStateMachine implements StateMachine
             }
 
             if ($ruleAttributes !== [] && $invariantAttributes !== []) {
-                throw new RuntimeException(sprintf(
+                throw new StatefulException(sprintf(
                     'Stateful method %s::%s cannot declare both #[Rule] and #[Invariant].',
                     $method->getDeclaringClass()->getName(),
                     $method->getName(),
@@ -131,6 +136,55 @@ final class AttributedStateMachine implements StateMachine
             ];
         }
 
+        return self::sortDefinitions($definitions);
+    }
+
+    /**
+     * @return list<array{kind: 'rule'|'invariant', name: string, method: ReflectionMethod}>
+     */
+    private static function discoverConventionMethods(object $machine): array
+    {
+        $reflection = new ReflectionObject($machine);
+        $definitions = [];
+
+        foreach ($reflection->getMethods() as $method) {
+            if ($method->getDeclaringClass()->getName() !== $reflection->getName()) {
+                continue;
+            }
+
+            $name = $method->getName();
+
+            if (self::matchesConvention($name, 'rule')) {
+                self::assertMethodIsUsable($method, 'rule');
+                $definitions[] = [
+                    'kind' => 'rule',
+                    'name' => self::normalizeConventionName($name, 'rule'),
+                    'method' => $method,
+                ];
+                continue;
+            }
+
+            if (! self::matchesConvention($name, 'invariant')) {
+                continue;
+            }
+
+            self::assertMethodIsUsable($method, 'invariant');
+            $definitions[] = [
+                'kind' => 'invariant',
+                'name' => self::normalizeConventionName($name, 'invariant'),
+                'method' => $method,
+            ];
+        }
+
+        return self::sortDefinitions($definitions);
+    }
+
+    /**
+     * @param list<array{kind: 'rule'|'invariant', name: string, method: ReflectionMethod}> $definitions
+     * @return list<array{kind: 'rule'|'invariant', name: string, method: ReflectionMethod}>
+     */
+    private static function sortDefinitions(array $definitions): array
+    {
         usort(
             $definitions,
             /**
@@ -165,18 +219,18 @@ final class AttributedStateMachine implements StateMachine
     private static function assertMethodIsUsable(ReflectionMethod $method, string $kind): void
     {
         if (! $method->isPublic()) {
-            throw new RuntimeException(sprintf(
-                'Stateful #[%s] method %s::%s must be public.',
-                ucfirst($kind),
+            throw new StatefulException(sprintf(
+                'Stateful %s method %s::%s must be public.',
+                $kind,
                 $method->getDeclaringClass()->getName(),
                 $method->getName(),
             ));
         }
 
         if ($method->isStatic()) {
-            throw new RuntimeException(sprintf(
-                'Stateful #[%s] method %s::%s must not be static.',
-                ucfirst($kind),
+            throw new StatefulException(sprintf(
+                'Stateful %s method %s::%s must not be static.',
+                $kind,
                 $method->getDeclaringClass()->getName(),
                 $method->getName(),
             ));
@@ -185,23 +239,51 @@ final class AttributedStateMachine implements StateMachine
         $parameters = $method->getParameters();
 
         if (count($parameters) > 1) {
-            throw new RuntimeException(sprintf(
-                'Stateful #[%s] method %s::%s must accept zero or one TestCase argument.',
-                ucfirst($kind),
+            throw new StatefulException(sprintf(
+                'Stateful %s method %s::%s must accept zero or one TestCase argument.',
+                $kind,
                 $method->getDeclaringClass()->getName(),
                 $method->getName(),
             ));
         }
 
         if ($parameters !== [] && ! self::parameterAcceptsTestCase($parameters[0])) {
-            throw new RuntimeException(sprintf(
-                'Stateful #[%s] method %s::%s parameter must accept %s.',
-                ucfirst($kind),
+            throw new StatefulException(sprintf(
+                'Stateful %s method %s::%s parameter must accept %s.',
+                $kind,
                 $method->getDeclaringClass()->getName(),
                 $method->getName(),
                 TestCase::class,
             ));
         }
+    }
+
+    private static function matchesConvention(string $name, string $prefix): bool
+    {
+        if (! str_starts_with($name, $prefix)) {
+            return false;
+        }
+
+        $suffix = substr($name, strlen($prefix));
+
+        if ($suffix === '') {
+            return true;
+        }
+
+        return $suffix[0] === '_' || ctype_upper($suffix[0]);
+    }
+
+    private static function normalizeConventionName(string $name, string $prefix): string
+    {
+        $suffix = substr($name, strlen($prefix));
+
+        if ($suffix === '') {
+            return $name;
+        }
+
+        $suffix = ltrim($suffix, '_');
+
+        return $suffix === '' ? $name : lcfirst($suffix);
     }
 
     private static function parameterAcceptsTestCase(ReflectionParameter $parameter): bool

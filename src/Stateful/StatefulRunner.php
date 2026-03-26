@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace Hegel\Stateful;
 
+use Hegel\Exception\StatefulException;
 use Hegel\Generators;
 use Hegel\StopTestException;
 use Hegel\TestCase;
 use Hegel\TestCaseControlFlow;
-use RuntimeException;
 use Throwable;
 
 final class StatefulRunner
@@ -33,7 +33,7 @@ final class StatefulRunner
         $rules = $machineDefinition->rules();
 
         if ($rules === []) {
-            throw new RuntimeException('Cannot run a machine with no rules.');
+            throw new StatefulException('Cannot run a machine with no rules.');
         }
 
         $ruleIndex = Generators::integers()->minValue(0)->maxValue(count($rules) - 1);
@@ -113,6 +113,6 @@ final class StatefulRunner
             return (int) $value;
         }
 
-        throw new RuntimeException(sprintf('Expected integer for %s, got %s.', $context, get_debug_type($value)));
+        throw new StatefulException(sprintf('Expected integer for %s, got %s.', $context, get_debug_type($value)));
     }
 }

@@ -17,16 +17,29 @@ use UnexpectedValueException;
 
 final class CborCodec
 {
+    private static ?Encoder $encoder = null;
+    private static ?Decoder $decoder = null;
+
     public static function encode(mixed $value): string
     {
-        return (new Encoder())->encode($value);
+        return self::encoder()->encode($value);
     }
 
     public static function decode(string $payload): mixed
     {
         return self::decodeObject(
-            Decoder::create()->decode(StringStream::create($payload)),
+            self::decoder()->decode(StringStream::create($payload)),
         );
+    }
+
+    private static function encoder(): Encoder
+    {
+        return self::$encoder ??= new Encoder();
+    }
+
+    private static function decoder(): Decoder
+    {
+        return self::$decoder ??= Decoder::create();
     }
 
     private static function decodeObject(object $object): mixed

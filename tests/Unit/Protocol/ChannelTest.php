@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Hegel\Exception\ProtocolException;
 use Hegel\Protocol\Channel;
 use Hegel\Protocol\Connection;
 use Hegel\Protocol\Packet;
@@ -72,7 +73,7 @@ it('unwraps cbor result envelopes while preserving integer values', function ():
     $serverConnection->close();
 });
 
-it('surfaces cbor error envelopes as runtime exceptions', function (): void {
+it('surfaces cbor error envelopes as protocol exceptions', function (): void {
     [$clientStream, $serverStream] = SocketPair::create();
 
     $clientConnection = new Connection($clientStream);
@@ -83,7 +84,7 @@ it('surfaces cbor error envelopes as runtime exceptions', function (): void {
     $server->writeReplyCbor(1, ['error' => 'boom', 'type' => 'ServerError']);
 
     expect(fn (): mixed => $client->requestCbor(['command' => 'ping']))
-        ->toThrow(RuntimeException::class, 'ServerError: boom');
+        ->toThrow(ProtocolException::class, 'ServerError: boom');
 
     $server->receiveRequest();
 
@@ -107,9 +108,9 @@ it('sends the close sentinel and rejects further blocking operations', function 
         ->and($closePacket->payload)->toBe(Channel::CLOSE_PAYLOAD)
         ->and($closePacket->isReply)->toBeFalse()
         ->and(fn (): int => $client->sendRequest('later'))
-        ->toThrow(RuntimeException::class, 'channel is closed')
+        ->toThrow(ProtocolException::class, 'channel is closed')
         ->and(fn (): Packet => $client->receiveRequest())
-        ->toThrow(RuntimeException::class, 'channel is closed');
+        ->toThrow(ProtocolException::class, 'channel is closed');
 
     $clientConnection->close();
     $serverConnection->close();

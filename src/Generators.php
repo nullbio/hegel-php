@@ -12,18 +12,25 @@ use Hegel\Generator\DateGenerator;
 use Hegel\Generator\DateTimeGenerator;
 use Hegel\Generator\DomainGenerator;
 use Hegel\Generator\EmailGenerator;
+use Hegel\Generator\FixedArrayGenerator;
+use Hegel\Generator\FixedDictBuilder;
 use Hegel\Generator\FloatGenerator;
 use Hegel\Generator\Generator as HegelGenerator;
+use Hegel\Generator\DefaultGeneratorResolver;
 use Hegel\Generator\HashMapGenerator;
+use Hegel\Generator\HashSetGenerator;
 use Hegel\Generator\IntegerGenerator;
 use Hegel\Generator\IpAddressGenerator;
 use Hegel\Generator\JustGenerator;
+use Hegel\Generator\ObjectGenerator;
 use Hegel\Generator\OneOfGenerator;
 use Hegel\Generator\OptionalGenerator;
 use Hegel\Generator\RegexGenerator;
 use Hegel\Generator\SampledFromGenerator;
 use Hegel\Generator\TextGenerator;
 use Hegel\Generator\TimeGenerator;
+use Hegel\Generator\TupleGenerator;
+use Hegel\Generator\UnitGenerator;
 use Hegel\Generator\UrlGenerator;
 
 final class Generators
@@ -103,6 +110,11 @@ final class Generators
         return new HashMapGenerator($keys, $values);
     }
 
+    public static function hashSets(HegelGenerator $elements): HashSetGenerator
+    {
+        return new HashSetGenerator($elements);
+    }
+
     public static function just(mixed $value): JustGenerator
     {
         return new JustGenerator($value);
@@ -129,5 +141,35 @@ final class Generators
     public static function composite(callable $composer): CompositeGenerator
     {
         return new CompositeGenerator($composer);
+    }
+
+    public static function fixedDicts(): FixedDictBuilder
+    {
+        return new FixedDictBuilder();
+    }
+
+    public static function tuples(HegelGenerator ...$elements): TupleGenerator
+    {
+        return new TupleGenerator(array_values($elements));
+    }
+
+    public static function fixedArrays(HegelGenerator $elements, int $size): FixedArrayGenerator
+    {
+        return new FixedArrayGenerator($elements, $size);
+    }
+
+    public static function unit(): UnitGenerator
+    {
+        return new UnitGenerator();
+    }
+
+    public static function default(string $type, HegelGenerator ...$arguments): HegelGenerator
+    {
+        return DefaultGeneratorResolver::fromDescriptor($type, ...$arguments);
+    }
+
+    public static function object(string $class): ObjectGenerator
+    {
+        return new ObjectGenerator($class);
     }
 }

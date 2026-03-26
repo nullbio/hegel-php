@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace Hegel\Generator;
 
+use Hegel\Exception\GenerationException;
 use Hegel\TestCase;
 use InvalidArgumentException;
-use RuntimeException;
 
 final class SampledFromGenerator extends AbstractGenerator
 {
@@ -44,7 +44,7 @@ final class SampledFromGenerator extends AbstractGenerator
                 $index = GeneratorValue::toInteger($value, 'sampledFrom index');
 
                 if (! array_key_exists($index, $this->values)) {
-                    throw new RuntimeException(sprintf('Generated sampledFrom index %d is out of range.', $index));
+                    throw new GenerationException(sprintf('Generated sampledFrom index %d is out of range.', $index));
                 }
 
                 return GeneratorValue::copy($this->values[$index]);

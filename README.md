@@ -36,14 +36,27 @@ hegel('parse never crashes on arbitrary input', function (TestCase $tc) {
     // Just verify it doesn't throw — any result is fine
     MyParser::parse($input);
 });
+
+hegel('shuffle preserves contents', function (TestCase $tc) {
+    $random = $tc->randomizer();
+    $values = $tc->draw(Generators::arrays(Generators::integers()));
+    $shuffled = $random->shuffleArray($values);
+
+    sort($values);
+    sort($shuffled);
+
+    expect($shuffled)->toBe($values);
+});
 ```
 
 ## How It Works
 
 hegel-php is a thin client that speaks the
-[Hegel protocol](https://hegel.dev/) over a Unix socket. Primitive generation,
-shrinking, and failure replay are handled by hegel-core, the same engine used
-by [hegel-rust](https://github.com/hegeldev/hegel-rust). Richer combinators are
+[Hegel protocol](https://hegel.dev/) over a persistent subprocess connection.
+By default it uses `hegel-core --stdio`, with an explicit Unix-socket fallback
+available via `HEGEL_SERVER_TRANSPORT=socket`. Primitive generation, shrinking,
+and failure replay are handled by hegel-core, the same engine used by
+[hegel-rust](https://github.com/hegeldev/hegel-rust). Richer combinators are
 composed client-side to match the reference implementation instead of inventing
 PHP-specific protocol behavior.
 
@@ -59,8 +72,7 @@ hood.
 
 ## Installation
 
-The package name is `nullbio/hegel-php`. Publishing and release automation are not
-set up yet, so this command is not live on Packagist yet:
+The package name is `nullbio/hegel-php`:
 
 ```bash
 composer require --dev nullbio/hegel-php
@@ -71,7 +83,11 @@ composer require --dev nullbio/hegel-php
 ```bash
 composer test
 composer analyse
+composer bench
 ```
+
+`composer bench` runs the local hot-path micro-benchmarks for CBOR encode/decode
+and generator schema construction.
 
 ## Generators
 
@@ -84,6 +100,13 @@ composer analyse
 | `Generators::binary()` | Raw byte strings |
 | `Generators::arrays($gen)` | Arrays of generated elements with size bounds and `->unique()` |
 | `Generators::maps($keyGen, $valueGen)` | Associative arrays (keys must be `int` or `string` in PHP) |
+| `Generators::hashSets($gen)` | Unique list-backed sets with size bounds |
+| `Generators::fixedDicts()` | Fixed-key dictionary builder via `->field(...)->build()` or `->into(Foo::class)` |
+| `Generators::tuples($gen1, $gen2, ...)` | Heterogeneous tuple/list generator |
+| `Generators::fixedArrays($gen, $size)` | Fixed-length homogeneous tuple/list generator |
+| `Generators::unit()` | Constant `null` unit-like generator |
+| `Generators::default($type, ...$args)` | PHP-native default resolver for scalars, containers, enums, and objects |
+| `Generators::object(Foo::class)` | Derived object generator with per-field overrides via `->with()` |
 | `Generators::just($value)` | Always returns the given value |
 | `Generators::sampledFrom([...])` | Uniformly sample from a fixed set |
 | `Generators::oneOf($gen1, $gen2, ...)` | Choose between generators |
@@ -97,6 +120,78 @@ composer analyse
 | `Generators::ipAddresses()` | IPv4/IPv6 addresses with `->v4()` / `->v6()` |
 | `Generators::fromRegex($pattern)` | Strings matching a regex |
 | `Generators::composite(fn)` | Build custom generators from other generators |
+
+### Derived Objects
+
+When you want PHP-native defaults instead of spelling out every field manually,
+use `Generators::default(...)` or `Generators::object(...)`.
+
+```php
+final readonly class UserData
+{
+    public function __construct(
+        public string $email,
+        public int $age,
+    ) {
+    }
+}
+
+$user = $tc->draw(Generators::default(UserData::class));
+
+$strictUser = $tc->draw(
+    Generators::object(UserData::class)
+        ->with('email', Generators::emails())
+        ->with('age', Generators::integers()->minValue(18)->maxValue(99))
+);
+
+$money = $tc->draw(
+    Generators::fixedDicts()
+        ->field('amount', Generators::integers()->minValue(1))
+        ->field('currency', Generators::sampledFrom(['USD', 'EUR']))
+        ->into(Money::class)
+);
+```
+
+`Generators::default(...)` supports:
+- scalar aliases like `'int'`, `'float'`, `'bool'`, `'string'`, and `'binary'`
+- container aliases like `'array'`, `'set'`, and `'map'` with element generators
+- enums via `sampledFrom(cases())`
+- constructor-derived objects
+- opt-in custom class generators via `Hegel\Generator\ProvidesGenerator`
+
+Runtime notes:
+- `hegel-core` is pinned to `0.2.3`
+- default transport is `--stdio`
+- Unix-socket transport remains available for compatibility via `HEGEL_SERVER_TRANSPORT=socket`
+
+### Randomizer
+
+Use `$tc->randomizer()` when you want shrinkable randomness through a PHP-native
+API instead of drawing every primitive manually.
+
+```php
+hegel('randomizer stays within requested bounds', function (TestCase $tc) {
+    $random = $tc->randomizer();
+
+    $id = $random->getInt(1000, 9999);
+    $fraction = $random->getFloat(0.0, 1.0);
+    $token = $random->getBytes(16);
+
+    expect($id)->toBeGreaterThanOrEqual(1000)->toBeLessThanOrEqual(9999);
+    expect($fraction)->toBeGreaterThanOrEqual(0.0)->toBeLessThan(1.0);
+    expect(strlen($token))->toBe(16);
+});
+```
+
+Available methods currently mirror the useful native `Random\Randomizer` subset:
+- `getInt()`, `nextInt()`
+- `getFloat()`, `nextFloat()`
+- `getBytes()`, `getBytesFromString()`
+- `shuffleArray()`, `shuffleBytes()`
+- `pickArrayKeys()`
+
+Use `$tc->randomizer(true)` to get a seeded native randomizer backed by one
+drawn seed instead of shrinkable per-call randomness.
 
 ### Combinators
 
@@ -133,10 +228,52 @@ The returned helper stays chainable with normal Pest methods too, so calls like
 | `verbosity` | normal | quiet, normal, verbose, debug |
 | `derandomize` | auto | Use deterministic seed from test name (auto-enabled in CI) |
 
+Public runtime failures are now grouped into:
+- `Hegel\Exception\ProtocolException`
+- `Hegel\Exception\GenerationException`
+- `Hegel\Exception\StatefulException`
+
+Argument validation still uses standard PHP exceptions like
+`InvalidArgumentException` and `ValueError`.
+
+## Class-Based Tests
+
+For Laravel-style or class-based Pest tests, use `Hegel\Testing\InteractsWithHegel`.
+
+```php
+use Hegel\Generators;
+use Hegel\Settings;
+use Hegel\Testing\InteractsWithHegel;
+use Hegel\Verbosity;
+
+final class CartTest extends Tests\TestCase
+{
+    use InteractsWithHegel;
+
+    public function test_add_item_is_stable(): void
+    {
+        $settings = (new Settings())
+            ->testCases(200)
+            ->verbosity(Verbosity::Debug);
+
+        $this->hegel(function (): void {
+            $quantity = $this->draw(Generators::integers()->minValue(1)->maxValue(10));
+            expect($quantity)->toBeGreaterThan(0);
+        }, $settings);
+    }
+}
+```
+
+Inside the `hegel()` callback, the trait exposes the same convenience methods as
+the standalone `TestCase`: `draw()`, `assume()`, `note()`, and `randomizer()`.
+
 ## Stateful Testing
 
-Stateful tests now support both attribute-based discovery and the explicit
-`StateMachine` interface. The attribute form is the shortest way to write one:
+Stateful tests now support explicit `StateMachine` implementations,
+attribute-based discovery, and a conservative naming convention fallback.
+If a machine has no `#[Rule]` / `#[Invariant]` attributes, public
+`ruleXxx()` and `invariantXxx()` methods are discovered automatically.
+The attribute form is still the shortest way to write one:
 
 ```php
 use Hegel\Stateful\Attributes\Invariant;

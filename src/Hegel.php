@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hegel;
 
+use Hegel\Exception\ProtocolException;
 use Hegel\Protocol\Channel;
 use Hegel\Protocol\Connection;
 use Hegel\Reporting\Counterexample;
@@ -28,9 +29,12 @@ final class Hegel
     private const float SUPPORTED_PROTOCOL_MIN = 0.6;
     private const float SUPPORTED_PROTOCOL_MAX = 0.7;
     private const string HANDSHAKE_STRING = 'hegel_handshake_start';
-    private const string SERVER_VERSION = '0.2.2';
+    private const string SERVER_VERSION = '0.2.3';
     private const string SERVER_COMMAND_ENV = 'HEGEL_SERVER_COMMAND';
+    private const string SERVER_TRANSPORT_ENV = 'HEGEL_SERVER_TRANSPORT';
     private const string SERVER_DIRECTORY = '.hegel';
+    private const string TRANSPORT_SOCKET = 'socket';
+    private const string TRANSPORT_STDIO = 'stdio';
     private const int SOCKET_CONNECT_ATTEMPTS = 50;
     private const int SOCKET_CONNECT_DELAY_US = 100_000;
     private const string UV_NOT_FOUND_MESSAGE = "You are seeing this error message because hegel-php tried to use `uv` to install hegel-core, but could not find uv on the PATH.\n\nHegel uses a Python server component called `hegel-core` to share core property-based testing functionality across languages. There are two ways for Hegel to get hegel-core:\n\n* By default, Hegel looks for uv (https://docs.astral.sh/uv/) on the PATH, and uses uv to install hegel-core to a local `.hegel/venv` directory. We recommend this option. To continue, install uv: https://docs.astral.sh/uv/getting-started/installation/.\n* Alternatively, you can manage the installation of hegel-core yourself. After installing, setting the HEGEL_SERVER_COMMAND environment variable to your hegel-core binary path tells hegel-php to use that hegel-core instead.\n\nSee https://hegel.dev/reference/installation for more details.";
@@ -70,17 +74,12 @@ final class Hegel
             $this->close();
         }
 
-        $this->socketDirectory = $this->createSocketDirectory();
-        $socketPath = $this->socketDirectory . DIRECTORY_SEPARATOR . 'hegel.sock';
-
         try {
             $commandPath = self::findHegelCommand();
-            $this->spawnServer($commandPath, $socketPath);
+            [$reader, $writer] = $this->startTransport($commandPath);
+            stream_set_timeout($reader, 120);
 
-            $stream = $this->connectToServer($socketPath);
-            stream_set_timeout($stream, 120);
-
-            $this->connection = new Connection($stream);
+            $this->connection = new Connection($reader, $writer);
             $this->connection->setServerExitChecker(fn (): bool => $this->hasServerExited());
             $this->controlChannel = $this->connection->controlChannel();
 
@@ -97,7 +96,7 @@ final class Hegel
         $this->refreshServerStatus();
 
         if ($this->connection === null) {
-            throw new RuntimeException('Hegel connection is not available.');
+            throw new ProtocolException('Hegel connection is not available.');
         }
 
         return $this->connection;
@@ -109,7 +108,7 @@ final class Hegel
         $this->refreshServerStatus();
 
         if ($this->controlChannel === null) {
-            throw new RuntimeException('Hegel control channel is not available.');
+            throw new ProtocolException('Hegel control channel is not available.');
         }
 
         return $this->controlChannel;
@@ -175,7 +174,7 @@ final class Hegel
                 $eventType = $event['payload']['event'] ?? null;
 
                 if (! is_string($eventType)) {
-                    throw new RuntimeException('Expected event in payload.');
+                    throw new ProtocolException('Expected event in payload.');
                 }
 
                 if ($eventType === 'test_case') {
@@ -191,25 +190,25 @@ final class Hegel
                     break;
                 }
 
-                throw new RuntimeException(sprintf('unknown event: %s', $eventType));
+                throw new ProtocolException(sprintf('unknown event: %s', $eventType));
             }
 
             $error = $results['error'] ?? null;
 
             if (is_string($error) && $error !== '') {
-                throw new RuntimeException(self::formatNamedFailure('Server error', $error));
+                throw new ProtocolException(self::formatNamedFailure('Server error', $error));
             }
 
             $healthCheckFailure = $results['health_check_failure'] ?? null;
 
             if (is_string($healthCheckFailure) && $healthCheckFailure !== '') {
-                throw new RuntimeException(self::formatNamedFailure('Health check failure', $healthCheckFailure));
+                throw new ProtocolException(self::formatNamedFailure('Health check failure', $healthCheckFailure));
             }
 
             $flaky = $results['flaky'] ?? null;
 
             if (is_string($flaky) && $flaky !== '') {
-                throw new RuntimeException(self::formatNamedFailure('Flaky test detected', $flaky));
+                throw new ProtocolException(self::formatNamedFailure('Flaky test detected', $flaky));
             }
 
             $interestingCount = $results['interesting_test_cases'] ?? 0;
@@ -223,7 +222,7 @@ final class Hegel
                 $eventType = $event['payload']['event'] ?? null;
 
                 if ($eventType !== 'test_case') {
-                    throw new RuntimeException('Expected final test_case event.');
+                    throw new ProtocolException('Expected final test_case event.');
                 }
 
                 $result = $this->handleTestCaseEvent($eventChannel, $event, $test, true);
@@ -241,12 +240,12 @@ final class Hegel
             }
 
             if (! $passed || $gotInteresting) {
-                throw new RuntimeException(self::formatPropertyFailure($counterexamples));
+                throw new ProtocolException(self::formatPropertyFailure($counterexamples));
             }
         } catch (RuntimeException $exception) {
             if ($exception->getMessage() === Connection::SERVER_EXITED_MESSAGE) {
                 $this->close();
-                throw new RuntimeException($this->withServerLog($exception->getMessage()), 0, $exception);
+                throw new ProtocolException($this->withServerLog($exception->getMessage()), 0, $exception);
             }
 
             throw $exception;
@@ -316,7 +315,7 @@ final class Hegel
         $control = $this->controlChannel;
 
         if ($control === null) {
-            throw new RuntimeException('Hegel control channel is not available.');
+            throw new ProtocolException('Hegel control channel is not available.');
         }
 
         $messageId = $control->sendRequest(self::HANDSHAKE_STRING);
@@ -325,18 +324,18 @@ final class Hegel
         $this->refreshServerStatus();
 
         if (! str_starts_with($response, 'Hegel/')) {
-            throw new RuntimeException(sprintf('Bad handshake response: %s', var_export($response, true)));
+            throw new ProtocolException(sprintf('Bad handshake response: %s', var_export($response, true)));
         }
 
         $versionString = substr($response, strlen('Hegel/'));
         $version = filter_var($versionString, FILTER_VALIDATE_FLOAT);
 
         if ($version === false) {
-            throw new RuntimeException(sprintf('Bad version number: %s', $versionString));
+            throw new ProtocolException(sprintf('Bad version number: %s', $versionString));
         }
 
         if ($version < self::SUPPORTED_PROTOCOL_MIN || $version > self::SUPPORTED_PROTOCOL_MAX) {
-            throw new RuntimeException(sprintf(
+            throw new ProtocolException(sprintf(
                 'hegel-php supports protocol versions %s through %s, but the connected server is using protocol version %s. Upgrading hegel-php or downgrading hegel-core might help.',
                 self::SUPPORTED_PROTOCOL_MIN,
                 self::SUPPORTED_PROTOCOL_MAX,
@@ -356,7 +355,7 @@ final class Hegel
             $status = $this->processStatus();
 
             if ($status !== false && ! $status['running']) {
-                throw new RuntimeException($this->withServerLog(sprintf(
+                throw new ProtocolException($this->withServerLog(sprintf(
                     'The hegel server process exited immediately (%s). See .hegel/server.log for diagnostic information.',
                     self::formatProcessStatus($status),
                 )));
@@ -377,13 +376,13 @@ final class Hegel
                 }
 
                 if ($attempts >= self::SOCKET_CONNECT_ATTEMPTS) {
-                    throw new RuntimeException(sprintf(
+                    throw new ProtocolException(sprintf(
                         'Failed to connect to hegel server socket: %s',
                         $errorMessage !== '' ? $errorMessage : 'unknown error',
                     ));
                 }
             } elseif ($attempts >= self::SOCKET_CONNECT_ATTEMPTS) {
-                throw new RuntimeException('Timeout waiting for hegel server to create socket');
+                throw new ProtocolException('Timeout waiting for hegel server to create socket');
             }
 
             usleep(self::SOCKET_CONNECT_DELAY_US);
@@ -391,7 +390,25 @@ final class Hegel
         }
     }
 
-    private function spawnServer(string $commandPath, string $socketPath): void
+    /**
+     * @return array{0: mixed, 1: mixed}
+     */
+    private function startTransport(string $commandPath): array
+    {
+        if (self::transportMode() === self::TRANSPORT_SOCKET) {
+            $this->socketDirectory = $this->createSocketDirectory();
+            $socketPath = $this->socketDirectory . DIRECTORY_SEPARATOR . 'hegel.sock';
+            $this->spawnSocketServer($commandPath, $socketPath);
+
+            $stream = $this->connectToServer($socketPath);
+
+            return [$stream, $stream];
+        }
+
+        return $this->spawnStdioServer($commandPath);
+    }
+
+    private function spawnSocketServer(string $commandPath, string $socketPath): void
     {
         self::ensureServerDirectory();
 
@@ -414,7 +431,7 @@ final class Hegel
         );
 
         if (! is_resource($this->process)) {
-            throw new RuntimeException(sprintf('Failed to spawn hegel at path %s', $commandPath));
+            throw new ProtocolException(sprintf('Failed to spawn hegel at path %s', $commandPath));
         }
 
         foreach ($this->pipes as $pipe) {
@@ -424,6 +441,47 @@ final class Hegel
         }
 
         $this->pipes = [];
+    }
+
+    /**
+     * @return array{0: mixed, 1: mixed}
+     */
+    private function spawnStdioServer(string $commandPath): array
+    {
+        self::ensureServerDirectory();
+
+        $environment = self::environment();
+        $environment['PYTHONUNBUFFERED'] = '1';
+
+        $descriptors = [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['file', self::serverLogPath(), 'a'],
+        ];
+
+        $this->process = @proc_open(
+            [$commandPath, '--stdio', '--verbosity', $this->settings->verbosityLevel()->value],
+            $descriptors,
+            $this->pipes,
+            null,
+            $environment,
+        );
+
+        if (! is_resource($this->process)) {
+            throw new ProtocolException(sprintf('Failed to spawn hegel at path %s', $commandPath));
+        }
+
+        $stdin = $this->pipes[0] ?? null;
+        $stdout = $this->pipes[1] ?? null;
+
+        if (! is_resource($stdin) || ! is_resource($stdout)) {
+            throw new ProtocolException('Failed to open hegel stdio pipes.');
+        }
+
+        stream_set_blocking($stdin, true);
+        stream_set_blocking($stdout, true);
+
+        return [$stdout, $stdin];
     }
 
     private function refreshServerStatus(): void
@@ -467,6 +525,26 @@ final class Hegel
         return self::ensureHegelInstalled();
     }
 
+    private static function transportMode(): string
+    {
+        $transport = getenv(self::SERVER_TRANSPORT_ENV);
+
+        if ($transport === false || $transport === '') {
+            return self::TRANSPORT_STDIO;
+        }
+
+        return match ($transport) {
+            self::TRANSPORT_SOCKET,
+            self::TRANSPORT_STDIO => $transport,
+            default => throw new ProtocolException(sprintf(
+                'Unknown hegel server transport: %s. Expected "%s" or "%s".',
+                $transport,
+                self::TRANSPORT_STDIO,
+                self::TRANSPORT_SOCKET,
+            )),
+        };
+    }
+
     private static function ensureHegelInstalled(): string
     {
         $venvDirectory = self::serverDirectoryPath() . DIRECTORY_SEPARATOR . 'venv';
@@ -487,13 +565,13 @@ final class Hegel
         $installLogPath = self::installLogPath();
 
         if (file_put_contents($installLogPath, '') === false) {
-            throw new RuntimeException('Failed to create install log.');
+            throw new ProtocolException('Failed to create install log.');
         }
 
         $uvPath = self::findExecutableOnPath('uv');
 
         if ($uvPath === null) {
-            throw new RuntimeException(self::UV_NOT_FOUND_MESSAGE);
+            throw new ProtocolException(self::UV_NOT_FOUND_MESSAGE);
         }
 
         $installPython = self::findInstallPython();
@@ -504,7 +582,7 @@ final class Hegel
         );
 
         if ($venvExitCode !== 0) {
-            throw new RuntimeException(sprintf(
+            throw new ProtocolException(sprintf(
                 "uv venv failed. Install log:\n%s",
                 self::readLog($installLogPath),
             ));
@@ -516,7 +594,7 @@ final class Hegel
         );
 
         if ($installExitCode !== 0) {
-            throw new RuntimeException(sprintf(
+            throw new ProtocolException(sprintf(
                 "Failed to install hegel-core (version: %s). Set %s to a hegel binary path to skip installation.\nInstall log:\n%s",
                 self::SERVER_VERSION,
                 self::SERVER_COMMAND_ENV,
@@ -525,7 +603,7 @@ final class Hegel
         }
 
         if (! self::isUsableInstalledHegelBinary($hegelBinary, $pythonPath)) {
-            throw new RuntimeException(sprintf(
+            throw new ProtocolException(sprintf(
                 'hegel not usable at %s after installation. Install log:%s%s',
                 $hegelBinary,
                 PHP_EOL,
@@ -534,7 +612,7 @@ final class Hegel
         }
 
         if (file_put_contents($versionFile, self::SERVER_VERSION) === false) {
-            throw new RuntimeException('Failed to write version file.');
+            throw new ProtocolException('Failed to write version file.');
         }
 
         return $hegelBinary;
@@ -545,7 +623,7 @@ final class Hegel
         $python = self::findExecutableOnPath('python3') ?? self::findExecutableOnPath('python');
 
         if ($python === null) {
-            throw new RuntimeException(
+            throw new ProtocolException(
                 'Hegel requires a Python interpreter on PATH to create the local .hegel virtual environment.',
             );
         }
@@ -569,7 +647,7 @@ final class Hegel
         $process = @proc_open($command, $descriptors, $pipes, null, $environment);
 
         if (! is_resource($process)) {
-            throw new RuntimeException(sprintf('Failed to run `%s`.', basename($command[0])));
+            throw new ProtocolException(sprintf('Failed to run `%s`.', basename($command[0])));
         }
 
         foreach ($pipes as $pipe) {
@@ -589,7 +667,7 @@ final class Hegel
             . bin2hex(random_bytes(8));
 
         if (! mkdir($directory, 0777, true) && ! is_dir($directory)) {
-            throw new RuntimeException(sprintf('Failed to create temp directory: %s', $directory));
+            throw new ProtocolException(sprintf('Failed to create temp directory: %s', $directory));
         }
 
         return $directory;
@@ -604,7 +682,7 @@ final class Hegel
         }
 
         if (! mkdir($directory, 0777, true) && ! is_dir($directory)) {
-            throw new RuntimeException(sprintf('Failed to create %s', self::SERVER_DIRECTORY));
+            throw new ProtocolException(sprintf('Failed to create %s', self::SERVER_DIRECTORY));
         }
     }
 
@@ -613,7 +691,7 @@ final class Hegel
         $currentDirectory = getcwd();
 
         if ($currentDirectory === false) {
-            throw new RuntimeException('Failed to resolve the current working directory.');
+            throw new ProtocolException('Failed to resolve the current working directory.');
         }
 
         return $currentDirectory . DIRECTORY_SEPARATOR . self::SERVER_DIRECTORY;
@@ -791,7 +869,7 @@ final class Hegel
         $channelId = $event['payload']['channel_id'] ?? null;
 
         if (! is_int($channelId)) {
-            throw new RuntimeException('Missing channel id');
+            throw new ProtocolException('Missing channel id');
         }
 
         $testCaseChannel = $this->connection()->connectChannel($channelId);
@@ -801,7 +879,7 @@ final class Hegel
         $this->refreshServerStatus();
 
         if ($this->connection()->serverHasExited()) {
-            throw new RuntimeException($this->withServerLog(Connection::SERVER_EXITED_MESSAGE));
+            throw new ProtocolException($this->withServerLog(Connection::SERVER_EXITED_MESSAGE));
         }
 
         return $interesting;

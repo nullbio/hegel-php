@@ -35,7 +35,8 @@
         "test": "@php ./vendor/bin/pest",
         "test:unit": "@php ./vendor/bin/pest tests/Unit",
         "test:integration": "@php ./vendor/bin/pest tests/Integration",
-        "analyse": "@php ./vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G"
+        "analyse": "@php ./vendor/bin/phpstan analyse -c phpstan.neon.dist --memory-limit=1G",
+        "bench": "@php ./bin/benchmark.php"
     },
     "config": {
         "sort-packages": true,

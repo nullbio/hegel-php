@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hegel\Protocol;
 
+use Hegel\Exception\ProtocolException;
 use RuntimeException;
 
 final class Connection
@@ -16,10 +17,13 @@ final class Connection
     private bool $serverExited = false;
     private bool $transportClosed = false;
     private mixed $serverExitChecker = null;
+    private mixed $writer;
 
     public function __construct(
-        private mixed $stream,
+        private mixed $reader,
+        mixed $writer = null,
     ) {
+        $this->writer = $writer ?? $reader;
     }
 
     public function controlChannel(): Channel
@@ -43,7 +47,7 @@ final class Connection
     public function sendPacket(Packet $packet): void
     {
         try {
-            Packet::writeTo($this->stream, $packet);
+            Packet::writeTo($this->writer, $packet);
         } catch (RuntimeException $exception) {
             throw $this->remapStreamError($exception);
         }
@@ -63,7 +67,7 @@ final class Connection
 
         try {
             while (true) {
-                $packet = Packet::readFrom($this->stream);
+                $packet = Packet::readFrom($this->reader);
 
                 if ($packet->channelId === $channelId) {
                     return $packet;
@@ -99,12 +103,27 @@ final class Connection
 
         $this->transportClosed = true;
 
-        if (! is_resource($this->stream)) {
+        $reader = $this->reader;
+        $writer = $this->writer;
+
+        if ($reader === $writer) {
+            if (! is_resource($reader)) {
+                return;
+            }
+
+            @stream_socket_shutdown($reader, STREAM_SHUT_RDWR);
+            fclose($reader);
+
             return;
         }
 
-        @stream_socket_shutdown($this->stream, STREAM_SHUT_RDWR);
-        fclose($this->stream);
+        if (is_resource($writer)) {
+            fclose($writer);
+        }
+
+        if (is_resource($reader)) {
+            fclose($reader);
+        }
     }
 
     private function remapStreamError(RuntimeException $exception): RuntimeException
@@ -112,7 +131,7 @@ final class Connection
         if ($exception->getMessage() === 'Unexpected end of packet stream.') {
             $this->serverExited = true;
 
-            return new RuntimeException(self::SERVER_EXITED_MESSAGE, 0, $exception);
+            return new ProtocolException(self::SERVER_EXITED_MESSAGE, 0, $exception);
         }
 
         if (! $this->serverExited && is_callable($this->serverExitChecker) && ($this->serverExitChecker)()) {
@@ -123,6 +142,6 @@ final class Connection
             return $exception;
         }
 
-        return new RuntimeException(self::SERVER_EXITED_MESSAGE, 0, $exception);
+        return new ProtocolException(self::SERVER_EXITED_MESSAGE, 0, $exception);
     }
 }

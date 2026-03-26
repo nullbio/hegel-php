@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace Hegel\Generator;
 
+use Hegel\Exception\GenerationException;
 use Hegel\SpanLabel;
 use Hegel\TestCase;
-use RuntimeException;
 
 final class OptionalGenerator extends AbstractGenerator
 {
@@ -64,7 +64,7 @@ final class OptionalGenerator extends AbstractGenerator
                 return match (GeneratorValue::toInteger($tag, 'optional tag')) {
                     0 => null,
                     1 => $inner->parse($payload),
-                    default => throw new RuntimeException('Generated optional tag is out of range.'),
+                    default => throw new GenerationException('Generated optional tag is out of range.'),
                 };
             },
         );

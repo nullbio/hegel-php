@@ -6,37 +6,19 @@ use Hegel\Protocol\CborCodec;
 use Hegel\Protocol\Packet;
 
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
+require __DIR__ . '/fake_hegel_transport.php';
 
 $argv = $_SERVER['argv'] ?? [];
-$socketPath = $argv[1] ?? null;
+['reader' => $reader, 'writer' => $writer, 'close' => $closeTransport] = hegelFakeOpenTransport($argv);
 
-if (! is_string($socketPath) || $socketPath === '') {
-    fwrite(STDERR, "missing socket path\n");
-    exit(1);
-}
-
-$server = @stream_socket_server('unix://' . $socketPath, $errorCode, $errorMessage);
-
-if ($server === false) {
-    fwrite(STDERR, sprintf("failed to create socket: %s\n", $errorMessage));
-    exit(1);
-}
-
-fwrite(STDOUT, "fake-hegel-server ready\n");
 fwrite(STDERR, "fake-hegel-server stderr\n");
-
-$connection = @stream_socket_accept($server, 5);
-
-if ($connection === false) {
-    fwrite(STDERR, "failed to accept connection\n");
-    exit(1);
-}
+fwrite(STDERR, "fake-hegel-server ready\n");
 
 $capture = [
     'argv' => array_slice($argv, 1),
 ];
 
-$handshakeRequest = Packet::readFrom($connection);
+$handshakeRequest = Packet::readFrom($reader);
 $capture['handshake'] = [
     'channel_id' => $handshakeRequest->channelId,
     'message_id' => $handshakeRequest->messageId,
@@ -50,11 +32,11 @@ if ($handshakeResponse === false) {
 }
 
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet(0, $handshakeRequest->messageId, true, $handshakeResponse),
 );
 
-$runTestRequest = Packet::readFrom($connection);
+$runTestRequest = Packet::readFrom($reader);
 $runTestPayload = CborCodec::decode($runTestRequest->payload);
 
 $capture['run_test'] = [
@@ -64,7 +46,7 @@ $capture['run_test'] = [
 ];
 
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet(0, $runTestRequest->messageId, true, CborCodec::encode(['result' => null])),
 );
 
@@ -81,7 +63,7 @@ $eventPayload = [
 ];
 
 Packet::writeTo(
-    $connection,
+    $writer,
     new Packet(
         $runTestPayload['channel_id'],
         $eventMessageId,
@@ -90,7 +72,7 @@ Packet::writeTo(
     ),
 );
 
-$ackPacket = Packet::readFrom($connection);
+$ackPacket = Packet::readFrom($reader);
 $capture['event_ack'] = [
     'channel_id' => $ackPacket->channelId,
     'message_id' => $ackPacket->messageId,
@@ -104,5 +86,4 @@ if (is_string($captureFile) && $captureFile !== '') {
     file_put_contents($captureFile, json_encode($capture, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
 }
 
-fclose($connection);
-fclose($server);
+$closeTransport();

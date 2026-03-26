@@ -93,6 +93,7 @@ it('provides a hegel helper that stays chainable with Pest', function (): void {
 
         expect($result['exit_code'])->toBe(0)
             ->and($result['stdout'])->toContain('1 passed')
+            ->and($capture['argv'][0])->toBe('--stdio')
             ->and($capture['argv'][1])->toBe('--verbosity')
             ->and($capture['argv'][2])->toBe('debug')
             ->and($capture['run_test']['payload']['test_cases'])->toBe(12)

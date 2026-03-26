@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Hegel\Exception\ProtocolException;
 use Hegel\Protocol\Connection;
 use Hegel\Protocol\Packet;
 use Hegel\Tests\Support\SocketPair;
@@ -49,7 +50,30 @@ it('remaps stream failures after the server has exited', function (): void {
     fclose($serverStream);
 
     expect(fn (): Packet => $connection->receivePacketForChannel(0))
-        ->toThrow(RuntimeException::class, 'The hegel server process exited unexpectedly.');
+        ->toThrow(ProtocolException::class, 'The hegel server process exited unexpectedly.');
 
+    $connection->close();
+});
+
+it('supports separate reader and writer transports', function (): void {
+    [$clientReader, $serverWriter] = SocketPair::create();
+    [$serverReader, $clientWriter] = SocketPair::create();
+
+    $connection = new Connection($clientReader, $clientWriter);
+
+    $connection->sendPacket(new Packet(3, 7, false, 'outbound'));
+    $written = Packet::readFrom($serverReader);
+
+    Packet::writeTo($serverWriter, new Packet(9, 2, false, 'inbound'));
+    $received = $connection->receivePacketForChannel(9);
+
+    expect($written->channelId)->toBe(3)
+        ->and($written->messageId)->toBe(7)
+        ->and($written->payload)->toBe('outbound')
+        ->and($received->channelId)->toBe(9)
+        ->and($received->payload)->toBe('inbound');
+
+    fclose($serverReader);
+    fclose($serverWriter);
     $connection->close();
 });

@@ -97,3 +97,111 @@ PHP;
         }
     });
 });
+
+it('shrinks a failing Pest property to a minimal counterexample against hegel-core', function (): void {
+    hegelWithTemporaryProject(function (string $projectDirectory): void {
+        $testFile = $projectDirectory . '/FailingPropertyTest.php';
+
+        $testContents = <<<'PHP'
+<?php
+
+declare(strict_types=1);
+
+use Hegel\Generators;
+use Hegel\TestCase;
+
+hegel('subtraction is commutative', function (TestCase $tc): void {
+    $x = $tc->draw(Generators::integers());
+    $y = $tc->draw(Generators::integers());
+
+    expect($x - $y)->toBe($y - $x);
+})->seed(123)->verbosity('quiet')->disableDatabase();
+PHP;
+
+        file_put_contents($testFile, $testContents);
+
+        $path = getenv('PATH');
+        $home = getenv('HOME');
+
+        $result = hegelRunProcess(
+            [
+                PHP_BINARY,
+                dirname(__DIR__, 2) . '/vendor/bin/pest',
+                '--bootstrap',
+                dirname(__DIR__, 2) . '/vendor/autoload.php',
+                '--colors=never',
+                $testFile,
+            ],
+            $projectDirectory,
+            [
+                'PATH' => is_string($path) ? $path : '',
+                'HOME' => is_string($home) ? $home : $projectDirectory,
+            ],
+        );
+
+        expect($result['exit_code'])->not->toBe(0)
+            ->and($result['stderr'])->toBe('')
+            ->and($result['stdout'])->toContain('subtraction is commutative')
+            ->and($result['stdout'])->toContain('Property test failed')
+            ->and($result['stdout'])->toContain('Counterexample:')
+            ->and($result['stdout'])->toContain('Draw 1: 0')
+            ->and($result['stdout'])->toContain('Draw 2: 1')
+            ->and($result['stdout'])->toContain('Failed asserting that -1 is identical to 1.')
+            ->and(is_file($projectDirectory . '/.hegel/venv/bin/hegel'))->toBeTrue()
+            ->and(is_file($projectDirectory . '/.hegel/server.log'))->toBeTrue();
+    });
+});
+
+it('shrinks a numeric edge-case property to a minimal counterexample against hegel-core', function (): void {
+    hegelWithTemporaryProject(function (string $projectDirectory): void {
+        $testFile = $projectDirectory . '/OverflowPropertyTest.php';
+
+        $testContents = <<<'PHP'
+<?php
+
+declare(strict_types=1);
+
+use Hegel\Generators;
+use Hegel\TestCase;
+
+hegel('addition round-trips through subtraction', function (TestCase $tc): void {
+    $x = $tc->draw(Generators::integers());
+    $y = $tc->draw(Generators::integers());
+
+    expect((($x + $y) - $y) === $x)->toBeTrue();
+})->seed(123)->verbosity('quiet')->disableDatabase();
+PHP;
+
+        file_put_contents($testFile, $testContents);
+
+        $path = getenv('PATH');
+        $home = getenv('HOME');
+
+        $result = hegelRunProcess(
+            [
+                PHP_BINARY,
+                dirname(__DIR__, 2) . '/vendor/bin/pest',
+                '--bootstrap',
+                dirname(__DIR__, 2) . '/vendor/autoload.php',
+                '--colors=never',
+                $testFile,
+            ],
+            $projectDirectory,
+            [
+                'PATH' => is_string($path) ? $path : '',
+                'HOME' => is_string($home) ? $home : $projectDirectory,
+            ],
+        );
+
+        expect($result['exit_code'])->not->toBe(0)
+            ->and($result['stderr'])->toBe('')
+            ->and($result['stdout'])->toContain('addition round-trips through subtraction')
+            ->and($result['stdout'])->toContain('Property test failed')
+            ->and($result['stdout'])->toContain('Counterexample:')
+            ->and($result['stdout'])->toContain('Draw 1: 1')
+            ->and($result['stdout'])->toContain(sprintf('Draw 2: %d', PHP_INT_MAX))
+            ->and($result['stdout'])->toContain('Failed asserting that false is true.')
+            ->and(is_file($projectDirectory . '/.hegel/venv/bin/hegel'))->toBeTrue()
+            ->and(is_file($projectDirectory . '/.hegel/server.log'))->toBeTrue();
+    });
+});
